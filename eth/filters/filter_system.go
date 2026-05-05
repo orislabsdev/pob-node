@@ -259,8 +259,11 @@ func NewEventSystem(sys *FilterSystem) *EventSystem {
 	if m.txsSub == nil || m.logsSub == nil || m.rmLogsSub == nil || m.chainSub == nil {
 		log.Crit("Subscribe for event system failed")
 	}
-	if m.voteSub == nil || m.finalizedHeaderSub == nil {
-		log.Warn("Subscribe for vote or finalized header event failed")
+	if m.voteSub == nil {
+		log.Debug("Subscribe for vote event failed (not supported by engine)")
+	}
+	if m.finalizedHeaderSub == nil {
+		log.Debug("Subscribe for finalized header event failed (not supported by engine)")
 	}
 
 	go m.eventLoop()

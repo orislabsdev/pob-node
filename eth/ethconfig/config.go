@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/clique"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/consensus/parlia"
+	"github.com/ethereum/go-ethereum/consensus/pob"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/history"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
@@ -268,6 +269,11 @@ func CreateConsensusEngine(config *params.ChainConfig, db ethdb.Database, ee *et
 	if config.IsInBSC() {
 		return parlia.New(config, db, ee, genesisHash), nil
 	}
+
+	if config.IsInPoB() {
+		return pob.New(config.Pob, config, db, ee, genesisHash), nil
+	}
+
 	if config.TerminalTotalDifficulty == nil {
 		log.Error("Geth only supports PoS networks. Please transition legacy networks using Geth v1.13.x.")
 		return nil, errors.New("'terminalTotalDifficulty' is not set in genesis block")

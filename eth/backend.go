@@ -37,6 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/parlia"
+	"github.com/ethereum/go-ethereum/consensus/pob"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/filtermaps"
 	"github.com/ethereum/go-ethereum/core/monitor"
@@ -498,8 +499,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 				// if there is no VotePool in Parlia Engine, the miner can't get votes for assembling
 				parlia.VotePool = votePool
 			}
-		} else {
-			return nil, errors.New("Engine is not Parlia type")
 		}
 		log.Info("Create votePool successfully")
 		eth.handler.votepool = votePool
@@ -572,6 +571,9 @@ func (s *Ethereum) APIs() []rpc.API {
 
 	// Append any APIs exposed explicitly by the consensus engine
 	if p, ok := s.engine.(*parlia.Parlia); ok {
+		apis = append(apis, p.APIs(s.BlockChain())...)
+	}
+	if p, ok := s.engine.(*pob.PoB); ok {
 		apis = append(apis, p.APIs(s.BlockChain())...)
 	}
 
@@ -809,6 +811,15 @@ func (s *Ethereum) StartMining() error {
 				s.waitForSyncAndMaxwell(parlia)
 			}()
 		}
+		if p, ok := s.engine.(*pob.PoB); ok {
+			wallet, err := s.accountManager.Find(accounts.Account{Address: eb})
+			if wallet == nil || err != nil {
+				log.Error("Etherbase account unavailable locally", "err", err)
+				return fmt.Errorf("signer missing: %v", err)
+			}
+			p.Authorize(eb, wallet.SignData)
+		}
+
 
 		go s.miner.Start()
 	}

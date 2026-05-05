@@ -324,6 +324,17 @@ func (api *BlockChainAPI) ChainId() *hexutil.Big {
 	return (*hexutil.Big)(api.b.ChainConfig().ChainID)
 }
 
+// StateAt returns the state at a specific block hash.
+func (api *BlockChainAPI) StateAt(hash common.Hash) (*state.StateDB, error) {
+	header, err := api.b.HeaderByHash(context.Background(), hash)
+	if err != nil {
+		return nil, err
+	}
+	bn := rpc.BlockNumber(header.Number.Int64())
+	st, _, err := api.b.StateAndHeaderByNumberOrHash(context.Background(), rpc.BlockNumberOrHash{BlockHash: &hash, BlockNumber: &bn})
+	return st, err
+}
+
 // BlockNumber returns the block number of the chain head.
 func (api *BlockChainAPI) BlockNumber() hexutil.Uint64 {
 	header, _ := api.b.HeaderByNumber(context.Background(), rpc.LatestBlockNumber) // latest header should always be available
@@ -1569,7 +1580,16 @@ type RPCTransaction struct {
 // representation, with the given location metadata set (if available).
 func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber uint64, blockTime uint64, index uint64, baseFee *big.Int, config *params.ChainConfig) *RPCTransaction {
 	signer := types.MakeSigner(config, new(big.Int).SetUint64(blockNumber), blockTime)
-	from, _ := types.Sender(signer, tx)
+	from, err := types.Sender(signer, tx)
+	if err != nil {
+		// PoB uses unsigned system transactions for block rewards. These have
+		// V/R/S all set to zero, so Sender recovery fails. For RPC, expose the
+		// conventional reward "from" address instead of the zero address.
+		v, r, s := tx.RawSignatureValues()
+		if v.Sign() == 0 && r.Sign() == 0 && s.Sign() == 0 && tx.GasPrice().Sign() == 0 {
+			from = params.PoBRewardAddress
+		}
+	}
 	v, r, s := tx.RawSignatureValues()
 	result := &RPCTransaction{
 		Type:     hexutil.Uint64(tx.Type()),

@@ -33,6 +33,7 @@ var (
 	BSCGenesisHash    = common.HexToHash("0x0d21840abff46b96c84b2ac9e10e4f5cdaeb5693cb665db62a2f3b02d2d57b5b")
 	ChapelGenesisHash = common.HexToHash("0x6d3c66c5357ec91d5c43af47e234a939b22557cbb552dc45bebbceeed90fbe34")
 	RialtoGenesisHash = common.HexToHash("0xee835a629f9cf5510b48b6ba41d69e0ff7d6ef10f977166ef939db41f59f5501")
+	POBGenesisHash    = common.HexToHash("")
 )
 
 func newUint64(val uint64) *uint64 { return &val }
@@ -258,6 +259,66 @@ var (
 		PasteurTime:         nil,
 
 		Parlia: &ParliaConfig{},
+		BlobScheduleConfig: &BlobScheduleConfig{
+			Cancun: DefaultCancunBlobConfig,
+			Prague: DefaultPragueBlobConfigBSC,
+			Osaka:  DefaultOsakaBlobConfigBSC,
+		},
+	}
+
+	POBChainConfig = &ChainConfig{
+		ChainID:             big.NewInt(56),
+		HomesteadBlock:      big.NewInt(0),
+		EIP150Block:         big.NewInt(0),
+		EIP155Block:         big.NewInt(0),
+		EIP158Block:         big.NewInt(0),
+		ByzantiumBlock:      big.NewInt(0),
+		ConstantinopleBlock: big.NewInt(0),
+		PetersburgBlock:     big.NewInt(0),
+		IstanbulBlock:       big.NewInt(0),
+		MuirGlacierBlock:    big.NewInt(0),
+		RamanujanBlock:      big.NewInt(0),
+		NielsBlock:          big.NewInt(0),
+		MirrorSyncBlock:     big.NewInt(0),
+		BrunoBlock:          big.NewInt(0),
+		EulerBlock:          big.NewInt(0),
+		NanoBlock:           big.NewInt(0),
+		MoranBlock:          big.NewInt(0),
+		GibbsBlock:          big.NewInt(0),
+		PlanckBlock:         big.NewInt(0),
+		LubanBlock:          big.NewInt(0),
+		PlatoBlock:          big.NewInt(0),
+		BerlinBlock:         big.NewInt(0),
+		LondonBlock:         big.NewInt(0),
+		HertzBlock:          big.NewInt(0),
+		HertzfixBlock:       big.NewInt(0),
+		ShanghaiTime:        newUint64(0), // 2024-01-23 08:00:00 AM UTC
+		KeplerTime:          newUint64(0), // 2024-01-23 08:00:00 AM UTC
+		FeynmanTime:         newUint64(0), // 2024-04-18 05:49:00 AM UTC
+		FeynmanFixTime:      newUint64(0), // 2024-04-18 05:49:00 AM UTC
+		CancunTime:          newUint64(0), // 2024-06-20 06:05:00 AM UTC
+		HaberTime:           newUint64(0), // 2024-06-20 06:05:00 AM UTC
+		HaberFixTime:        newUint64(0), // 2024-09-26 02:02:00 AM UTC
+		BohrTime:            newUint64(0), // 2024-09-26 02:20:00 AM UTC
+		PascalTime:          newUint64(0), // 2025-03-20 02:10:00 AM UTC
+		PragueTime:          newUint64(0), // 2025-03-20 02:10:00 AM UTC
+		LorentzTime:         newUint64(0), // 2025-04-29 05:05:00 AM UTC
+		MaxwellTime:         newUint64(0), // 2025-06-30 02:30:00 AM UTC
+		FermiTime:           newUint64(0), // 2026-01-14 02:30:00 AM UTC
+		OsakaTime:           newUint64(0), // 2026-04-28 02:30:00 AM UTC
+		MendelTime:          newUint64(0), // 2026-04-28 02:30:00 AM UTC
+		BPO1Time:            nil,          // will be skipped in BSC
+		BPO2Time:            nil,          // will be skipped in BSC
+		AmsterdamTime:       nil,
+		PasteurTime:         nil,
+
+		Pob: &PoBConfig{
+			Period:         3,
+			Epoch:          200,
+			PoolSize:       21,
+			MinBalanceWei:  big.NewInt(1e18),
+			RewardPerBlock: big.NewInt(1e18),
+		},
 		BlobScheduleConfig: &BlobScheduleConfig{
 			Cancun: DefaultCancunBlobConfig,
 			Prague: DefaultPragueBlobConfigBSC,
@@ -603,6 +664,8 @@ func GetBuiltInChainConfig(ghash common.Hash) *ChainConfig {
 		return MainnetChainConfig
 	case BSCGenesisHash:
 		return BSCChainConfig
+	case POBGenesisHash:
+		return POBChainConfig
 	case ChapelGenesisHash:
 		return ChapelChainConfig
 	case RialtoGenesisHash:
@@ -767,6 +830,7 @@ type ChainConfig struct {
 	HertzBlock      *big.Int `json:"hertzBlock,omitempty"`      // hertzBlock switch block (nil = no fork, 0 = already activated)
 	HertzfixBlock   *big.Int `json:"hertzfixBlock,omitempty"`   // hertzfixBlock switch block (nil = no fork, 0 = already activated)
 
+	Pob *PoBConfig `json:"pob,omitempty"`
 	// Various consensus engines
 	Ethash             *EthashConfig       `json:"ethash,omitempty"`
 	Clique             *CliqueConfig       `json:"clique,omitempty"`
@@ -813,7 +877,9 @@ func (c *ChainConfig) Description() string {
 	banner += fmt.Sprintf("Chain ID:  %v (%s)\n", c.ChainID, network)
 	switch {
 	case c.IsInBSC():
-		banner += "Consensus: Parlia (proof-of-staked--authority)\n"
+		banner += "Consensus: Parlia (proof-of-staked-authority)\n"
+	case c.IsInPoB():
+		banner += "Consensus: PoB (proof-of-balance)\n"
 	case c.Ethash != nil:
 		banner += "Consensus: Beacon (proof-of-stake), merged from Ethash (proof-of-work)\n"
 	case c.Clique != nil:
@@ -836,6 +902,8 @@ func (c *ChainConfig) String() string {
 		engine = c.Clique
 	case c.IsInBSC():
 		engine = c.Parlia
+	case c.IsInPoB():
+		engine = c.Pob
 	default:
 		engine = "unknown"
 	}
@@ -1370,8 +1438,16 @@ func (c *ChainConfig) IsInBSC() bool {
 	return c.Parlia != nil
 }
 
+func (c *ChainConfig) IsInPoB() bool {
+	return c.Pob != nil
+}
+
 func (c *ChainConfig) IsNotInBSC() bool {
 	return c.Parlia == nil
+}
+
+func (c *ChainConfig) IsNotInPoB() bool {
+	return c.Pob == nil
 }
 
 // IsLorentz returns whether time is either equal to the Lorentz fork time or greater.
@@ -1540,8 +1616,8 @@ func (c *ChainConfig) CheckCompatible(newcfg *ChainConfig, height uint64, time u
 // CheckConfigForkOrder checks that we don't "skip" any forks, geth isn't pluggable enough
 // to guarantee that forks can be implemented in a different order than on official networks
 func (c *ChainConfig) CheckConfigForkOrder() error {
-	// skip checking for non-Parlia egine
-	if c.IsNotInBSC() {
+	// skip checking for non-Parlia or non-PoB engine
+	if c.IsNotInBSC() && c.IsNotInPoB() {
 		return nil
 	}
 	type fork struct {
@@ -2132,9 +2208,13 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 	if chainID == nil {
 		chainID = new(big.Int)
 	}
-	// disallow setting Merge out of order
-	isMerge = isMerge && c.IsLondon(num) // always false in BSC
-	isVerkle := isMerge && c.IsVerkle(num, timestamp)
+
+	isMerge = isMerge && c.IsLondon(num)
+
+	isPostMergeLike := isMerge || c.IsInBSC() || c.IsInPoB()
+
+	isVerkle := isPostMergeLike && c.IsVerkle(num, timestamp)
+
 	return Rules{
 		ChainID:          new(big.Int).Set(chainID),
 		IsHomestead:      c.IsHomestead(num),
@@ -2148,30 +2228,32 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 		IsBerlin:         c.IsBerlin(num),
 		IsEIP2929:        c.IsBerlin(num) && !isVerkle,
 		IsLondon:         c.IsLondon(num),
-		IsMerge:          isMerge,
-		IsNano:           c.IsNano(num),
-		IsMoran:          c.IsMoran(num),
-		IsPlanck:         c.IsPlanck(num),
-		IsLuban:          c.IsLuban(num),
-		IsPlato:          c.IsPlato(num),
-		IsHertz:          c.IsHertz(num),
-		IsHertzfix:       c.IsHertzfix(num),
-		IsShanghai:       (isMerge || c.IsInBSC()) && c.IsShanghai(num, timestamp),
-		IsKepler:         c.IsKepler(num, timestamp),
-		IsFeynman:        c.IsFeynman(num, timestamp),
-		IsCancun:         (isMerge || c.IsInBSC()) && c.IsCancun(num, timestamp),
-		IsHaber:          c.IsHaber(num, timestamp),
-		IsBohr:           c.IsBohr(num, timestamp),
-		IsPascal:         c.IsPascal(num, timestamp),
-		IsPrague:         (isMerge || c.IsInBSC()) && c.IsPrague(num, timestamp),
-		IsLorentz:        c.IsLorentz(num, timestamp),
-		IsMaxwell:        c.IsMaxwell(num, timestamp),
-		IsFermi:          c.IsFermi(num, timestamp),
-		IsOsaka:          (isMerge || c.IsInBSC()) && c.IsOsaka(num, timestamp),
-		IsMendel:         c.IsMendel(num, timestamp),
-		IsAmsterdam:      (isMerge || c.IsInBSC()) && c.IsAmsterdam(num, timestamp),
-		IsPasteur:        c.IsPasteur(num, timestamp),
-		IsVerkle:         c.IsVerkle(num, timestamp),
-		IsEIP4762:        isVerkle,
+		IsMerge:          isPostMergeLike,
+
+		IsNano:     c.IsNano(num),
+		IsMoran:    c.IsMoran(num),
+		IsPlanck:   c.IsPlanck(num),
+		IsLuban:    c.IsLuban(num),
+		IsPlato:    c.IsPlato(num),
+		IsHertz:    c.IsHertz(num),
+		IsHertzfix: c.IsHertzfix(num),
+
+		IsShanghai:  isPostMergeLike && c.IsShanghai(num, timestamp),
+		IsKepler:    c.IsKepler(num, timestamp),
+		IsFeynman:   c.IsFeynman(num, timestamp),
+		IsCancun:    isPostMergeLike && c.IsCancun(num, timestamp),
+		IsHaber:     c.IsHaber(num, timestamp),
+		IsBohr:      c.IsBohr(num, timestamp),
+		IsPascal:    c.IsPascal(num, timestamp),
+		IsPrague:    isPostMergeLike && c.IsPrague(num, timestamp),
+		IsLorentz:   c.IsLorentz(num, timestamp),
+		IsMaxwell:   c.IsMaxwell(num, timestamp),
+		IsFermi:     c.IsFermi(num, timestamp),
+		IsOsaka:     isPostMergeLike && c.IsOsaka(num, timestamp),
+		IsMendel:    c.IsMendel(num, timestamp),
+		IsAmsterdam: isPostMergeLike && c.IsAmsterdam(num, timestamp),
+		IsPasteur:   c.IsPasteur(num, timestamp),
+		IsVerkle:    isVerkle,
+		IsEIP4762:   isVerkle,
 	}
 }

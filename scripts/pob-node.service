@@ -1,0 +1,17 @@
+[Unit]
+Description=PoB Chain Node
+After=network.target
+
+[Service]
+Type=simple
+User=jupiter
+WorkingDirectory=/Users/jupiter/Documents/jobs/golang/github.com/orislabsdev/pob-node
+ExecStart=/Users/jupiter/Documents/jobs/golang/github.com/orislabsdev/pob-node/scripts/pob-node-service.sh
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pob-node
+
+[Install]
+WantedBy=multi-user.target

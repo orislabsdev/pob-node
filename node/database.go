@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
+	"github.com/ethereum/go-ethereum/ethdb/polarysdb"
 	"github.com/ethereum/go-ethereum/log"
 )
 
@@ -79,7 +80,7 @@ func openDatabase(o internalOpenOptions) (ethdb.Database, error) {
 //	db is existent     |  from db         |  specified type (if compatible)
 func openKeyValueDatabase(o internalOpenOptions) (ethdb.KeyValueStore, error) {
 	// Reject any unsupported database type
-	if len(o.dbEngine) != 0 && o.dbEngine != rawdb.DBLeveldb && o.dbEngine != rawdb.DBPebble {
+	if len(o.dbEngine) != 0 && o.dbEngine != rawdb.DBLeveldb && o.dbEngine != rawdb.DBPebble && o.dbEngine != rawdb.DBPolarysdb {
 		return nil, fmt.Errorf("unknown db.engine %v", o.dbEngine)
 	}
 	// Retrieve any pre-existing database's type and use that or the requested one
@@ -95,6 +96,10 @@ func openKeyValueDatabase(o internalOpenOptions) (ethdb.KeyValueStore, error) {
 	if o.dbEngine == rawdb.DBLeveldb || existingDb == rawdb.DBLeveldb {
 		log.Info("Using leveldb as the backing database")
 		return newLevelDBDatabase(o.directory, o.Cache, o.Handles, o.MetricsNamespace, o.ReadOnly)
+	}
+	if o.dbEngine == rawdb.DBPolarysdb || existingDb == rawdb.DBPolarysdb {
+		log.Info("Using polarysdb as the backing database")
+		return newPolarysDBDatabase(o.directory, o.Cache, o.Handles, o.MetricsNamespace, o.ReadOnly)
 	}
 	// No pre-existing database, no user-requested one either. Default to Pebble.
 	log.Info("Defaulting to pebble as the backing database")
@@ -116,6 +121,16 @@ func newLevelDBDatabase(file string, cache int, handles int, namespace string, r
 // moving immutable chain segments into cold storage.
 func newPebbleDBDatabase(file string, cache int, handles int, namespace string, readonly bool) (ethdb.KeyValueStore, error) {
 	db, err := pebble.New(file, cache, handles, namespace, readonly)
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+// newPolarysDBDatabase creates a persistent key-value database without a freezer
+// moving immutable chain segments into cold storage.
+func newPolarysDBDatabase(file string, cache int, handles int, namespace string, readonly bool) (ethdb.KeyValueStore, error) {
+	db, err := polarysdb.New(file, cache, handles, namespace, readonly)
 	if err != nil {
 		return nil, err
 	}

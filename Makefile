@@ -17,6 +17,18 @@ geth:
 	@echo "Done building."
 	@echo "Run \"$(GOBIN)/geth\" to launch geth."
 
+#? install: Install the geth binary to /usr/local/bin as 'pob-node'.
+install: geth
+	@echo "Installing geth to /usr/local/bin/pob-node..."
+	@sudo cp $(GOBIN)/geth /usr/local/bin/pob-node
+	@echo "Installation complete. You can now run 'pob-node'."
+
+#? uninstall: Remove the pob-node binary from /usr/local/bin.
+uninstall:
+	@echo "Uninstalling /usr/local/bin/pob-node..."
+	@sudo rm -f /usr/local/bin/pob-node
+	@echo "Uninstallation complete."
+
 #? faucet: Build faucet
 faucet:
 	$(GORUN) build/ci.go install ./cmd/faucet

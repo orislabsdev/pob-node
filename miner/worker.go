@@ -33,7 +33,6 @@ import (
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
-	"github.com/ethereum/go-ethereum/consensus/parlia"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/stateless"
@@ -431,7 +430,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			}
 			clearPending(head.Header.Number.Uint64())
 			timestamp = time.Now().Unix()
-			if p, ok := w.engine.(*parlia.Parlia); ok {
+			if p, ok := w.engine.(consensus.PoSA); ok {
 				signedRecent, err := p.SignRecently(w.chain, head.Header)
 				if err != nil {
 					timer.Reset(recommit)
@@ -763,8 +762,8 @@ func (w *worker) commitTransactions(env *environment, plainTxs, blobTxs *transac
 	)
 	if env.gasPool == nil {
 		env.gasPool = new(core.GasPool).AddGas(gasLimit)
-		if p, ok := w.engine.(*parlia.Parlia); ok {
-			gasReserved := p.EstimateGasReservedForSystemTxs(w.chain, env.header)
+		if posa, ok := w.engine.(consensus.PoSA); ok {
+			gasReserved := posa.EstimateGasReservedForSystemTxs(w.chain, env.header)
 			env.gasPool.SubGas(gasReserved)
 			log.Debug("commitTransactions", "number", env.header.Number.Uint64(), "time", env.header.Time, "EstimateGasReservedForSystemTxs", gasReserved)
 		}
@@ -1031,6 +1030,18 @@ func (w *worker) prepareWork(genParams *generateParams, witness bool) (*environm
 	if w.chainConfig.IsPrague(header.Number, header.Time) {
 		core.ProcessParentBlockHash(header.ParentHash, env.evm)
 	}
+
+	// Apply PoB reward as a system transaction
+	if w.chainConfig.Pob != nil {
+		if engine, ok := w.engine.(pobEngine); ok {
+			reward := engine.CalculateReward(header.Number.Uint64(), env.state)
+			if reward.Sign() > 0 {
+				w.applyPoBReward(env, reward)
+				// We don't call UpdateIssuedRewards here because it will be called
+				// in the consensus engine's Finalize method when processing the system tx.
+			}
+		}
+	}
 	return env, nil
 }
 
@@ -1132,6 +1143,25 @@ func (w *worker) fillTransactions(interruptCh chan int32, env *environment, stop
 	}
 
 	return nil
+}
+
+type pobEngine interface {
+	CalculateReward(number uint64, state vm.StateDB) *big.Int
+	UpdateIssuedRewards(state vm.StateDB, reward *big.Int, number uint64)
+}
+
+func (w *worker) applyPoBReward(env *environment, reward *big.Int) {
+	// Generate a system transaction for the reward
+	nonce := env.state.GetNonce(params.PoBRewardAddress)
+	tx := types.NewTransaction(nonce, env.header.Coinbase, reward, 0, big.NewInt(0), nil)
+
+	// Add to environment's transactions
+	env.txs = append(env.txs, tx)
+	env.size += tx.Size()
+	env.tcount++
+
+	// Note: We don't apply it to the state here.
+	// It will be applied during Finalize when the block is finalized.
 }
 
 // generateWork generates a sealing block based on the given parameters.
@@ -1274,11 +1304,11 @@ LOOP:
 			break
 		} else {
 			if !w.inTurn() && len(workList) == 1 {
-				if parliaEngine, ok := w.engine.(*parlia.Parlia); ok {
+				if posa, ok := w.engine.(consensus.PoSA); ok {
 					// When mining out of turn, continuous access to the txpool and trie database
 					// may cause lock contention, slowing down transaction insertion and block importing.
 					// Applying a backoff delay mitigates this issue and significantly reduces CPU usage.
-					if blockInterval, err := parliaEngine.BlockInterval(w.chain, w.chain.CurrentBlock()); err == nil {
+					if blockInterval, err := posa.BlockInterval(w.chain, w.chain.CurrentBlock()); err == nil {
 						beforeSealing := time.Until(time.UnixMilli(int64(work.header.MilliTimestamp())))
 						if wait := beforeSealing - time.Duration(blockInterval)*time.Millisecond; wait > 0 {
 							log.Debug("Applying backoff before mining", "block", work.header.Number, "waiting(ms)", wait.Milliseconds())
@@ -1535,15 +1565,15 @@ func (w *worker) getSealingBlock(params *generateParams) *newPayloadResult {
 }
 
 func (w *worker) tryWaitProposalDoneWhenStopping() {
-	parlia, ok := w.engine.(*parlia.Parlia)
-	// if the consensus is not parlia, just skip waiting
+	posa, ok := w.engine.(consensus.PoSA)
+	// if the consensus is not posa, just skip waiting
 	if !ok {
 		return
 	}
 
 	currentHeader := w.chain.CurrentBlock()
 	currentBlock := currentHeader.Number.Uint64()
-	startBlock, endBlock, err := parlia.NextProposalBlock(w.chain, currentHeader, w.coinbase)
+	startBlock, endBlock, err := posa.NextProposalBlock(w.chain, currentHeader, w.coinbase)
 	if err != nil {
 		log.Warn("Failed to get next proposal block, skip waiting", "err", err)
 		return
@@ -1555,7 +1585,7 @@ func (w *worker) tryWaitProposalDoneWhenStopping() {
 		log.Warn("next proposal end block has passed, ignore")
 		return
 	}
-	blockInterval, err := parlia.BlockInterval(w.chain, currentHeader)
+	blockInterval, err := posa.BlockInterval(w.chain, currentHeader)
 	if err != nil {
 		log.Debug("failed to get BlockInterval when tryWaitProposalDoneWhenStopping")
 	}

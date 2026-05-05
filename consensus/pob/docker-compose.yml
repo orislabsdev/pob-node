@@ -1,0 +1,128 @@
+# docker-compose.yml
+# Spins up a 3-node PoB testnet with a bootnode.
+#
+# Prerequisites
+# ─────────────
+#  - Build the patched geth image first:
+#      docker build -t pob-geth:latest .
+#  - Place your validator passwords in ./secrets/password.txt
+#  - Export ETHERBASE_1, ETHERBASE_2, ETHERBASE_3 for each validator.
+
+version: "3.9"
+
+x-node-base: &node-base
+  image: pob-geth:latest
+  restart: unless-stopped
+  volumes:
+    - ./genesis.json:/app/genesis.json:ro
+    - ./secrets/password.txt:/app/password.txt:ro
+
+services:
+
+  # ── Bootnode ───────────────────────────────────────────────────────────────
+  bootnode:
+    <<: *node-base
+    container_name: pob-bootnode
+    command: >
+      bootnode
+        --genkey=/data/boot.key
+        --addr=0.0.0.0:30301
+    ports:
+      - "30301:30301/udp"
+    volumes:
+      - bootnode-data:/data
+
+  # ── Validator 1 (genesis sealer) ───────────────────────────────────────────
+  validator1:
+    <<: *node-base
+    container_name: pob-validator1
+    depends_on: [bootnode]
+    environment:
+      ETHERBASE: "${ETHERBASE_1:-0x3a7a7c25b7d3cf1e2f4b5c6d8e9f0a1b2c3d4e5f}"
+    command: >
+      geth
+        --datadir /data
+        --networkid 14558
+        --bootnodes "enode://BOOTNODE_ENODE@bootnode:30301"
+        --port 30303
+        --http --http.addr 0.0.0.0 --http.port 8545
+        --http.api eth,net,web3,debug,pob
+        --mine
+        --miner.etherbase ${ETHERBASE_1:-0x3a7a7c25b7d3cf1e2f4b5c6d8e9f0a1b2c3d4e5f}
+        --unlock ${ETHERBASE_1:-0x3a7a7c25b7d3cf1e2f4b5c6d8e9f0a1b2c3d4e5f}
+        --password /app/password.txt
+        --allow-insecure-unlock
+        --syncmode full
+        --gcmode archive
+        --verbosity 3
+    ports:
+      - "8545:8545"
+      - "30303:30303"
+    volumes:
+      - validator1-data:/data
+      - ./genesis.json:/app/genesis.json:ro
+      - ./secrets/password.txt:/app/password.txt:ro
+
+  # ── Validator 2 ────────────────────────────────────────────────────────────
+  validator2:
+    <<: *node-base
+    container_name: pob-validator2
+    depends_on: [bootnode]
+    command: >
+      geth
+        --datadir /data
+        --networkid 14558
+        --bootnodes "enode://BOOTNODE_ENODE@bootnode:30301"
+        --port 30304
+        --http --http.addr 0.0.0.0 --http.port 8546
+        --http.api eth,net,web3,debug,pob
+        --mine
+        --miner.etherbase ${ETHERBASE_2:-}
+        --unlock ${ETHERBASE_2:-}
+        --password /app/password.txt
+        --allow-insecure-unlock
+        --syncmode full
+        --gcmode archive
+        --verbosity 3
+    ports:
+      - "8546:8546"
+      - "30304:30304"
+    volumes:
+      - validator2-data:/data
+      - ./genesis.json:/app/genesis.json:ro
+      - ./secrets/password.txt:/app/password.txt:ro
+
+  # ── Validator 3 ────────────────────────────────────────────────────────────
+  validator3:
+    <<: *node-base
+    container_name: pob-validator3
+    depends_on: [bootnode]
+    command: >
+      geth
+        --datadir /data
+        --networkid 14558
+        --bootnodes "enode://BOOTNODE_ENODE@bootnode:30301"
+        --port 30305
+        --http --http.addr 0.0.0.0 --http.port 8547
+        --http.api eth,net,web3,debug,pob
+        --mine
+        --miner.etherbase ${ETHERBASE_3:-}
+        --unlock ${ETHERBASE_3:-}
+        --password /app/password.txt
+        --allow-insecure-unlock
+        --syncmode full
+        --gcmode archive
+        --verbosity 3
+    ports:
+      - "8547:8547"
+      - "30305:30305"
+    volumes:
+      - validator3-data:/data
+      - ./genesis.json:/app/genesis.json:ro
+      - ./secrets/password.txt:/app/password.txt:ro
+
+volumes:
+  bootnode-data:
+  validator1-data:
+  validator2-data:
+  validator3-data:

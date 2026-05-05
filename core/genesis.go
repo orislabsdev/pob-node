@@ -605,6 +605,20 @@ func (g *Genesis) Commit(db ethdb.Database, triedb *triedb.Database) (*types.Blo
 	if config.Clique != nil && len(g.ExtraData) < 32+crypto.SignatureLength {
 		return nil, errors.New("can't start clique chain without signers")
 	}
+	// Calculate Genesis supply for PoB
+	if config.Pob != nil {
+		totalAlloc := new(big.Int)
+		for _, account := range g.Alloc {
+			if account.Balance != nil {
+				totalAlloc.Add(totalAlloc, account.Balance)
+			}
+		}
+		config.Pob.GenesisAllocation = totalAlloc
+		if config.Pob.MaxSupply == nil {
+			// Default to 21 million tokens for PoB
+			config.Pob.MaxSupply = new(big.Int).Mul(big.NewInt(21000000), big.NewInt(params.Ether))
+		}
+	}
 	// flush the data to disk and compute the state root
 	root, err := flushAlloc(&g.Alloc, triedb)
 	if err != nil {

@@ -64,6 +64,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.22
 	github.com/pion/stun/v2 v2.0.0
 	github.com/pkg/errors v0.9.1
+	github.com/polarysfoundation/polarysdb v1.1.4
 	github.com/protolambda/bls12-381-util v0.1.0
 	github.com/protolambda/zrnt v0.34.1
 	github.com/protolambda/ztyp v0.2.2
@@ -97,6 +98,7 @@ require (
 require (
 	github.com/ferranbt/fastssz v0.1.4 // indirect
 	github.com/fjl/gencodec v0.1.0 // indirect
+	github.com/polarysfoundation/pm-256 v1.1.0 // indirect
 )
 
 require (
@@ -169,7 +171,7 @@ require (
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.25.1 // indirect
 	github.com/gtank/merlin v0.1.1 // indirect
-	github.com/hashicorp/golang-lru v0.5.5-0.20210104140557-80c98217689d // indirect
+	github.com/hashicorp/golang-lru v0.5.5-0.20210104140557-80c98217689d
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/herumi/bls-eth-go-binary v1.31.0 // indirect
 	github.com/influxdata/line-protocol v0.0.0-20210311194329-9aa0e372d097 // indirect

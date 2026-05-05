@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.orislabs.pobnode</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jupiter/Documents/jobs/golang/github.com/orislabsdev/pob-node/scripts/pob-node-service.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>/Users/jupiter/Documents/jobs/golang/github.com/orislabsdev/pob-node</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jupiter/Library/Logs/pob-node.err</string>
+    <key>StandardOutPath</key>
+    <string>/Users/jupiter/Library/Logs/pob-node.out</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>GETH_BIN</key>
+        <string>/usr/local/bin/pob-node</string>
+        <!-- Add other custom parameters here -->
+        <!-- <key>ETHERBASE</key> <string>0x...</string> -->
+    </dict>
+</dict>
+</plist>

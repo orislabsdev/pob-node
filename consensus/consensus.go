@@ -166,4 +166,7 @@ type PoSA interface {
 	VerifyVote(chain ChainHeaderReader, vote *types.VoteEnvelope) error
 	IsActiveValidatorAt(chain ChainHeaderReader, header *types.Header, checkVoteKeyFn func(bLSPublicKey *types.BLSPublicKey) bool) bool
 	NextProposalBlock(chain ChainHeaderReader, header *types.Header, proposer common.Address) (uint64, uint64, error)
+	SignRecently(chain ChainReader, parent *types.Header) (bool, error)
+	BlockInterval(chain ChainHeaderReader, header *types.Header) (uint64, error)
+	EstimateGasReservedForSystemTxs(chain ChainHeaderReader, header *types.Header) uint64
 }

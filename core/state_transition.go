@@ -575,11 +575,14 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 			st.state.AddBalance(consensus.SystemAddress, blobFeeU256, tracing.BalanceIncreaseRewardTransactionFee)
 		}
 	} else {
-		st.state.AddBalance(st.evm.Context.Coinbase, fee, tracing.BalanceIncreaseRewardTransactionFee)
+		// If PoB is enabled, all gas fees are burned.
+		if st.evm.ChainConfig().Pob == nil {
+			st.state.AddBalance(st.evm.Context.Coinbase, fee, tracing.BalanceIncreaseRewardTransactionFee)
 
-		// add the coinbase to the witness iff the fee is greater than 0
-		if rules.IsEIP4762 && fee.Sign() != 0 {
-			st.evm.AccessEvents.AddAccount(st.evm.Context.Coinbase, true, math.MaxUint64)
+			// add the coinbase to the witness iff the fee is greater than 0
+			if rules.IsEIP4762 && fee.Sign() != 0 {
+				st.evm.AccessEvents.AddAccount(st.evm.Context.Coinbase, true, math.MaxUint64)
+			}
 		}
 	}
 

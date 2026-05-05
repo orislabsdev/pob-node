@@ -325,6 +325,13 @@ const (
 	// BalanceIncreaseBSCDistributeReward is a balance change that increases the block validator's balance and
 	// happens when BSC is distributing rewards to validator.
 	BalanceIncreaseBSCDistributeReward BalanceChangeReason = 211
+
+	// BalanceDecreasePoBSystemFee is a balance change that decreases the PoB system address' balance and
+	// happens when PoB is distributing rewards to validator.
+	BalanceDecreasePoBSystemFee BalanceChangeReason = 212
+	// BalanceIncreasePoBValidatorReward is a balance change that increases the block validator's balance and
+	// happens when PoB is distributing rewards to validator.
+	BalanceIncreasePoBValidatorReward BalanceChangeReason = 213
 )
 
 // GasChangeReason is used to indicate the reason for a gas change, useful
@@ -426,6 +433,9 @@ const (
 	// NonceChangeRevert is emitted when the nonce is reverted back to a previous value due to call failure.
 	// It is only emitted when the tracer has opted in to use the journaling wrapper (WrapWithJournal).
 	NonceChangeRevert NonceChangeReason = 6
+
+	// NonceChangePoBSystem is the nonce change of the PoB system address when issuing rewards.
+	NonceChangePoBSystem NonceChangeReason = 7
 )
 
 // CodeChangeReason is used to indicate the reason for a code change.

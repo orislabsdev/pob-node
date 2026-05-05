@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 )
-
 const largeTxGasLimit = 10000000 // 10M Gas, to measure the execution time of large tx
 
 // StateProcessor is a basic Processor, which takes care of transitioning
@@ -109,6 +108,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	if config.IsPrague(block.Number(), block.Time()) || config.IsVerkle(block.Number(), block.Time()) {
 		ProcessParentBlockHash(block.ParentHash(), evm)
 	}
+
 
 	// Iterate over and process the individual transactions
 	posa, isPoSA := p.chain.Engine().(consensus.PoSA)
@@ -193,6 +193,7 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		GasUsed:  *usedGas,
 	}, nil
 }
+
 
 // ApplyTransactionWithEVM attempts to apply a transaction to the given state database
 // and uses the input parameters for its environment similar to ApplyTransaction. However,

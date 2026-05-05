@@ -1015,16 +1015,22 @@ func (api *API) TraceTransaction(ctx context.Context, hash common.Hash, config *
 	}
 	defer release()
 
-	msg, err := core.TransactionToMessage(tx, types.MakeSigner(api.backend.ChainConfig(), block.Number(), block.Time()), block.BaseFee())
-	if err != nil {
-		return nil, err
-	}
-
 	var isSystemTx bool
 	if posa, ok := api.backend.Engine().(consensus.PoSA); ok {
 		if isSystem, _ := posa.IsSystemTransaction(tx, block.Header()); isSystem {
 			isSystemTx = true
 		}
+	}
+
+	msg, err := core.TransactionToMessage(tx, types.MakeSigner(api.backend.ChainConfig(), block.Number(), block.Time()), block.BaseFee())
+	if err != nil {
+		// PoB system transactions are unsigned and not executed in the EVM (they are applied
+		// directly in the consensus engine). Some explorers still call debug_traceTransaction
+		// for these txs; return a synthetic "empty" trace instead of bubbling signature errors.
+		if isSystemTx && errors.Is(err, types.ErrInvalidSig) {
+			return syntheticSystemTxTrace(tx, config), nil
+		}
+		return nil, err
 	}
 
 	txctx := &Context{
@@ -1034,6 +1040,37 @@ func (api *API) TraceTransaction(ctx context.Context, hash common.Hash, config *
 		TxHash:      hash,
 	}
 	return api.traceTx(ctx, tx, msg, txctx, vmctx, statedb, config, isSystemTx, nil)
+}
+
+func syntheticSystemTxTrace(tx *types.Transaction, config *TraceConfig) interface{} {
+	// Prefer a callTracer-shaped result when requested (commonly used by explorers).
+	if config != nil && config.Tracer != nil && *config.Tracer != "" {
+		switch *config.Tracer {
+		case "callTracer":
+			to := tx.To()
+			return map[string]interface{}{
+				"type":    "CALL",
+				"from":    params.PoBRewardAddress,
+				"to":      to,
+				"gas":     hexutil.Uint64(0),
+				"gasUsed": hexutil.Uint64(0),
+				"input":   hexutil.Bytes{},
+				"output":  hexutil.Bytes{},
+				"value":   (*hexutil.Big)(tx.Value()),
+				"calls":   []interface{}{},
+				"logs":    []interface{}{},
+			}
+		default:
+			return map[string]interface{}{}
+		}
+	}
+	// Default tracer is the struct-logger. Return an empty execution result.
+	return &logger.ExecutionResult{
+		Gas:         0,
+		Failed:      false,
+		ReturnValue: hexutil.Bytes{},
+		StructLogs:  []json.RawMessage{},
+	}
 }
 
 // TraceCall lets you trace a given eth_call. It collects the structured logs

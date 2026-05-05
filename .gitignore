@@ -62,3 +62,9 @@ cmd/geth/geth
 cmd/rlpdump/rlpdump
 cmd/workload/workload
 cmd/keeper/keeper
+
+password.txt
+new_address.txt
+new_password.txt
+genesis.json
+data
