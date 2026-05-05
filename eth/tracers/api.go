@@ -597,7 +597,14 @@ func (api *API) IntermediateRoots(ctx context.Context, hash common.Hash, config 
 			}
 		}
 
-		msg, _ := core.TransactionToMessage(tx, signer, block.BaseFee())
+		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		if err != nil {
+			// Skip PoB unsigned system txs when generating intermediate roots.
+			if !beforeSystemTx && errors.Is(err, types.ErrInvalidSig) {
+				continue
+			}
+			return roots, err
+		}
 		if !beforeSystemTx {
 			msg.SkipTransactionChecks = true
 		}
@@ -700,7 +707,14 @@ func (api *API) traceBlock(ctx context.Context, block *types.Block, config *Trac
 		}
 
 		// Generate the next state snapshot fast without tracing
-		msg, _ := core.TransactionToMessage(tx, signer, block.BaseFee())
+		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		if err != nil {
+			// Skip PoB unsigned system txs during tracing reexec.
+			if !beforeSystemTx && errors.Is(err, types.ErrInvalidSig) {
+				continue
+			}
+			return nil, err
+		}
 		txctx := &Context{
 			BlockHash:   blockHash,
 			BlockNumber: block.Number(),

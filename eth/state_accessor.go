@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
@@ -289,11 +290,24 @@ func (eth *Ethereum) stateAtTransaction(ctx context.Context, block *types.Block,
 			return tx, context, statedb, release, nil
 		}
 		// Assemble the transaction call message and return if the requested offset
-		msg, _ := core.TransactionToMessage(tx, signer, block.BaseFee())
-		if !beforeSystemTx {
-			msg.SkipTransactionChecks = true
+		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		if err != nil {
+			// PoB system transactions are unsigned and not executed in the EVM. During state
+			// re-exec, we still need to advance state for tracing other txs. Apply the system
+			// tx effects directly instead of feeding it through ApplyMessage (which would
+			// enforce baseFee checks and fail because gas fields are zero).
+			if !beforeSystemTx && errors.Is(err, types.ErrInvalidSig) {
+				// Apply the PoB reward transfer effect.
+				to := tx.To()
+				statedb.AddBalance(*to, uint256.MustFromBig(tx.Value()), tracing.BalanceIncreasePoBValidatorReward)
+				statedb.SetNonce(params.PoBRewardAddress, tx.Nonce()+1, tracing.NonceChangePoBSystem)
+				// Finalise and continue.
+				statedb.Finalise(eth.blockchain.Config().IsEIP158(block.Number()))
+				continue
+			} else {
+				return nil, vm.BlockContext{}, nil, nil, fmt.Errorf("transaction %#x failed: %v", tx.Hash(), err)
+			}
 		}
-
 		// Not yet the searched for transaction, execute on top of the current state
 		statedb.SetTxContext(tx.Hash(), idx)
 		if _, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(tx.Gas())); err != nil {
@@ -301,7 +315,7 @@ func (eth *Ethereum) stateAtTransaction(ctx context.Context, block *types.Block,
 		}
 		// Ensure any modifications are committed to the state
 		// Only delete empty objects if EIP158/161 (a.k.a Spurious Dragon) is in effect
-		statedb.Finalise(evm.ChainConfig().IsEIP158(block.Number()))
+		statedb.Finalise(eth.blockchain.Config().IsEIP158(block.Number()))
 	}
 	return nil, vm.BlockContext{}, nil, nil, fmt.Errorf("transaction index %d out of range for block %#x", txIndex, block.Hash())
 }

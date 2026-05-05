@@ -1582,9 +1582,8 @@ func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber
 	signer := types.MakeSigner(config, new(big.Int).SetUint64(blockNumber), blockTime)
 	from, err := types.Sender(signer, tx)
 	if err != nil {
-		// PoB uses unsigned system transactions for block rewards. These have
-		// V/R/S all set to zero, so Sender recovery fails. For RPC, expose the
-		// conventional reward "from" address instead of the zero address.
+		// PoB uses unsigned system transactions for block rewards. These have V/R/S == 0.
+		// For RPC only, show a stable `from` address, but do NOT populate tx sender cache.
 		v, r, s := tx.RawSignatureValues()
 		if v.Sign() == 0 && r.Sign() == 0 && s.Sign() == 0 && tx.GasPrice().Sign() == 0 {
 			from = params.PoBRewardAddress
