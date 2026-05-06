@@ -50,6 +50,10 @@ const (
 	DynamicFeeTxType = 0x02
 	BlobTxType       = 0x03
 	SetCodeTxType    = 0x04
+	// SystemTxType is a PoB-specific EIP-2718 typed transaction used for consensus
+	// system operations (e.g. block reward, fee burn). It is not intended to be
+	// accepted from users via the txpool or RPC.
+	SystemTxType = 0x7e
 )
 
 // Transaction is an Ethereum transaction.
@@ -212,6 +216,8 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 		inner = new(BlobTx)
 	case SetCodeTxType:
 		inner = new(SetCodeTx)
+	case SystemTxType:
+		inner = new(SystemTx)
 	default:
 		return nil, ErrTxTypeNotSupported
 	}
@@ -313,6 +319,24 @@ func (tx *Transaction) Nonce() uint64 { return tx.inner.nonce() }
 // For contract-creation transactions, To returns nil.
 func (tx *Transaction) To() *common.Address {
 	return copyAddressPtr(tx.inner.to())
+}
+
+// SystemFrom returns the explicit sender address for PoB system transactions.
+func (tx *Transaction) SystemFrom() (common.Address, bool) {
+	itx, ok := tx.inner.(*SystemTx)
+	if !ok {
+		return common.Address{}, false
+	}
+	return itx.From, true
+}
+
+// SystemKind returns the semantic kind for PoB system transactions.
+func (tx *Transaction) SystemKind() (SystemTxKind, bool) {
+	itx, ok := tx.inner.(*SystemTx)
+	if !ok {
+		return 0, false
+	}
+	return itx.Kind, true
 }
 
 // Cost returns (gas * gasPrice) + (blobGas * blobGasPrice) + value.

@@ -1161,7 +1161,20 @@ type pobEngine interface {
 func (w *worker) applyPoBReward(env *environment, reward *big.Int) {
 	// Generate a system transaction for the reward
 	nonce := env.state.GetNonce(params.PoBRewardAddress)
-	tx := types.NewTransaction(nonce, env.header.Coinbase, reward, 0, big.NewInt(0), nil)
+	var tx *types.Transaction
+	if w.chainConfig.IsPoBSystemTxType(env.header.Time) {
+		tx = types.NewTx(&types.SystemTx{
+			ChainID: new(big.Int).Set(w.chainConfig.ChainID),
+			From:    params.PoBRewardAddress,
+			Nonce:   nonce,
+			To:      env.header.Coinbase,
+			Value:   new(big.Int).Set(reward),
+			Data:    nil,
+			Kind:    types.SystemTxKindReward,
+		})
+	} else {
+		tx = types.NewTransaction(nonce, env.header.Coinbase, reward, 0, big.NewInt(0), nil)
+	}
 
 	// Add to environment's transactions
 	env.txs = append(env.txs, tx)
@@ -1180,7 +1193,20 @@ func (w *worker) applyPoBBurnPlaceholder(env *environment) {
 	env.pobTraceBurn = true
 
 	nonce := env.state.GetNonce(params.PoBRewardAddress) + 1 // immediately after reward system tx
-	tx := types.NewTransaction(nonce, params.PoBBurnAddress, common.Big0, 0, big.NewInt(0), nil)
+	var tx *types.Transaction
+	if w.chainConfig.IsPoBSystemTxType(env.header.Time) {
+		tx = types.NewTx(&types.SystemTx{
+			ChainID: new(big.Int).Set(w.chainConfig.ChainID),
+			From:    params.PoBRewardAddress,
+			Nonce:   nonce,
+			To:      params.PoBBurnAddress,
+			Value:   common.Big0,
+			Data:    nil,
+			Kind:    types.SystemTxKindBurn,
+		})
+	} else {
+		tx = types.NewTransaction(nonce, params.PoBBurnAddress, common.Big0, 0, big.NewInt(0), nil)
+	}
 
 	env.txs = append(env.txs, tx)
 	env.size += tx.Size()
@@ -1231,7 +1257,19 @@ func (w *worker) generateWork(genParam *generateParams, witness bool) *newPayloa
 				burn.SetUint64(0)
 			}
 			nonce := work.txs[1].Nonce()
-			work.txs[1] = types.NewTransaction(nonce, params.PoBBurnAddress, burn.ToBig(), 0, big.NewInt(0), nil)
+			if w.chainConfig.IsPoBSystemTxType(work.header.Time) {
+				work.txs[1] = types.NewTx(&types.SystemTx{
+					ChainID: new(big.Int).Set(w.chainConfig.ChainID),
+					From:    params.PoBRewardAddress,
+					Nonce:   nonce,
+					To:      params.PoBBurnAddress,
+					Value:   burn.ToBig(),
+					Data:    nil,
+					Kind:    types.SystemTxKindBurn,
+				})
+			} else {
+				work.txs[1] = types.NewTransaction(nonce, params.PoBBurnAddress, burn.ToBig(), 0, big.NewInt(0), nil)
+			}
 		}
 	}
 

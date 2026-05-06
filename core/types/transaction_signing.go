@@ -148,6 +148,15 @@ func Sender(signer Signer, tx *Transaction) (common.Address, error) {
 		}
 	}
 
+	// PoB typed system transactions carry an explicit sender.
+	if tx.Type() == SystemTxType {
+		if itx, ok := tx.inner.(*SystemTx); ok {
+			addr := itx.From
+			tx.from.Store(&sigCache{signer: signer, from: addr})
+			return addr, nil
+		}
+	}
+
 	// Support for PoB system transactions which are unsigned.
 	v, r, s := tx.RawSignatureValues()
 	if v.Sign() == 0 && r.Sign() == 0 && s.Sign() == 0 && tx.Gas() == 0 && tx.GasPrice().Sign() == 0 {

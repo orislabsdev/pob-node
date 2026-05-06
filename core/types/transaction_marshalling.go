@@ -32,6 +32,7 @@ type txJSON struct {
 	Type hexutil.Uint64 `json:"type"`
 
 	ChainID              *hexutil.Big           `json:"chainId,omitempty"`
+	From                 *common.Address        `json:"from,omitempty"`
 	Nonce                *hexutil.Uint64        `json:"nonce"`
 	To                   *common.Address        `json:"to"`
 	Gas                  *hexutil.Uint64        `json:"gas"`
@@ -48,6 +49,7 @@ type txJSON struct {
 	R                    *hexutil.Big           `json:"r"`
 	S                    *hexutil.Big           `json:"s"`
 	YParity              *hexutil.Uint64        `json:"yParity,omitempty"`
+	SystemKind           *hexutil.Uint64        `json:"systemKind,omitempty"`
 
 	// Blob transaction sidecar encoding:
 	Blobs       []kzg4844.Blob       `json:"blobs,omitempty"`
@@ -170,6 +172,18 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		enc.S = (*hexutil.Big)(itx.S.ToBig())
 		yparity := itx.V.Uint64()
 		enc.YParity = (*hexutil.Uint64)(&yparity)
+	case *SystemTx:
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.From = &itx.From
+		enc.Nonce = (*hexutil.Uint64)(&itx.Nonce)
+		enc.To = &itx.To
+		zeroGas := hexutil.Uint64(0)
+		enc.Gas = &zeroGas
+		enc.GasPrice = (*hexutil.Big)(common.Big0)
+		enc.Value = (*hexutil.Big)(itx.Value)
+		enc.Input = (*hexutil.Bytes)(&itx.Data)
+		kind := hexutil.Uint64(itx.Kind)
+		enc.SystemKind = &kind
 	}
 	return json.Marshal(&enc)
 }
@@ -506,6 +520,37 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 				return err
 			}
 		}
+	case SystemTxType:
+		var itx SystemTx
+		inner = &itx
+		if dec.ChainID == nil {
+			return errors.New("missing required field 'chainId' in transaction")
+		}
+		itx.ChainID = (*big.Int)(dec.ChainID)
+		if dec.From == nil {
+			return errors.New("missing required field 'from' in transaction")
+		}
+		itx.From = *dec.From
+		if dec.Nonce == nil {
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		itx.Nonce = uint64(*dec.Nonce)
+		if dec.To == nil {
+			return errors.New("missing required field 'to' in transaction")
+		}
+		itx.To = *dec.To
+		if dec.Value == nil {
+			return errors.New("missing required field 'value' in transaction")
+		}
+		itx.Value = (*big.Int)(dec.Value)
+		if dec.Input == nil {
+			return errors.New("missing required field 'input' in transaction")
+		}
+		itx.Data = *dec.Input
+		if dec.SystemKind == nil {
+			return errors.New("missing required field 'systemKind' in transaction")
+		}
+		itx.Kind = SystemTxKind(uint8(uint64(*dec.SystemKind)))
 
 	default:
 		return ErrTxTypeNotSupported

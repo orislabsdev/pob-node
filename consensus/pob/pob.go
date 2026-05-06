@@ -139,6 +139,51 @@ func New(config *params.PoBConfig, chainConfig *params.ChainConfig, db ethdb.Dat
 // IsSystemTransaction reports whether the transaction is a system transaction.
 // PoB uses system transactions for block rewards. These are unsigned.
 func (p *PoB) IsSystemTransaction(tx *types.Transaction, header *types.Header) (bool, error) {
+	// If PoB typed system txs are active, only accept the dedicated typed format.
+	if p.chainConfig.IsPoBSystemTxType(header.Time) {
+		if tx.Type() != types.SystemTxType {
+			return false, nil
+		}
+		if tx.Gas() != 0 || tx.GasPrice().Sign() != 0 || len(tx.Data()) != 0 {
+			return false, fmt.Errorf("invalid PoB typed system tx shape: gas=%d gasPrice=%s dataLen=%d", tx.Gas(), tx.GasPrice(), len(tx.Data()))
+		}
+		if tx.ChainId().Cmp(p.chainConfig.ChainID) != 0 {
+			return false, fmt.Errorf("invalid PoB typed system tx chainId: have=%s want=%s", tx.ChainId(), p.chainConfig.ChainID)
+		}
+		from, ok := tx.SystemFrom()
+		if !ok {
+			return false, fmt.Errorf("invalid PoB typed system tx: missing from")
+		}
+		if from != params.PoBRewardAddress {
+			return false, fmt.Errorf("invalid PoB typed system tx sender: %s", from.Hex())
+		}
+		kind, ok := tx.SystemKind()
+		if !ok {
+			return false, fmt.Errorf("invalid PoB typed system tx: missing kind")
+		}
+		to := tx.To()
+		if to == nil {
+			return false, fmt.Errorf("invalid PoB typed system tx: missing to")
+		}
+		switch kind {
+		case types.SystemTxKindReward:
+			if *to != header.Coinbase {
+				return false, fmt.Errorf("invalid PoB reward recipient: %s", to.Hex())
+			}
+			return true, nil
+		case types.SystemTxKindBurn:
+			if !p.chainConfig.PobTraceBurn {
+				return false, fmt.Errorf("unexpected PoB burn tx (pobTraceBurn disabled)")
+			}
+			if *to != params.PoBBurnAddress {
+				return false, fmt.Errorf("invalid PoB burn recipient: %s", to.Hex())
+			}
+			return true, nil
+		default:
+			return false, fmt.Errorf("invalid PoB typed system tx kind: %d", kind)
+		}
+	}
+
 	// System transactions in PoB are unsigned (V, R, S are zero)
 	v, r, s := tx.RawSignatureValues()
 	if v.Sign() != 0 || r.Sign() != 0 || s.Sign() != 0 {
@@ -839,7 +884,7 @@ func (p *PoB) processRegistrations(header *types.Header, txs []*types.Transactio
 		if len(tx.Data()) < 4 || !bytes.Equal(tx.Data()[:4], registerSelector) {
 			continue
 		}
-		sender, err := signer.Sender(tx)
+		sender, err := types.Sender(signer, tx)
 		if err != nil {
 			continue // malformed signature — already rejected by the tx pool
 		}

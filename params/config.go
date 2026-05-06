@@ -837,6 +837,10 @@ type ChainConfig struct {
 	// This is a consensus-affecting flag and must be enabled consistently across
 	// the network via genesis configuration.
 	PobTraceBurn bool `json:"pobTraceBurn,omitempty"`
+	// PobSystemTxTypeTime activates the PoB typed system transaction format (EIP-2718 style).
+	// When active, PoB system transactions must use `types.SystemTxType` and will no longer
+	// be encoded as legacy unsigned transactions.
+	PobSystemTxTypeTime *uint64 `json:"pobSystemTxTypeTime,omitempty"`
 	// Various consensus engines
 	Ethash             *EthashConfig       `json:"ethash,omitempty"`
 	Clique             *CliqueConfig       `json:"clique,omitempty"`
@@ -1153,6 +1157,11 @@ func (c *ChainConfig) IsMirrorSync(num *big.Int) bool {
 // IsOnMirrorSync returns whether num is equal to the MirrorSync fork block
 func (c *ChainConfig) IsOnMirrorSync(num *big.Int) bool {
 	return configBlockEqual(c.MirrorSyncBlock, num)
+}
+
+// IsPoBSystemTxType returns whether the PoB typed system tx format is active at the given timestamp.
+func (c *ChainConfig) IsPoBSystemTxType(time uint64) bool {
+	return isTimestampForked(c.PobSystemTxTypeTime, time)
 }
 
 // IsBruno returns whether num is either equal to the Burn fork block or greater.

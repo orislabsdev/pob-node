@@ -2394,6 +2394,9 @@ func (api *TransactionAPI) SendRawTransaction(ctx context.Context, input hexutil
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
 	}
+	if tx.Type() == types.SystemTxType {
+		return common.Hash{}, errors.New("system transaction type is forbidden via RPC")
+	}
 
 	// Convert legacy blob transaction proofs.
 	// TODO: remove in go-ethereum v1.17.x
@@ -2416,6 +2419,9 @@ func (api *TransactionAPI) SendRawTransactionSync(ctx context.Context, input hex
 	tx := new(types.Transaction)
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return nil, err
+	}
+	if tx.Type() == types.SystemTxType {
+		return nil, errors.New("system transaction type is forbidden via RPC")
 	}
 
 	// Convert legacy blob transaction proofs.
@@ -2513,6 +2519,9 @@ func (api *TransactionAPI) SendRawTransactionConditional(ctx context.Context, in
 	tx := new(types.Transaction)
 	if err := tx.UnmarshalBinary(input); err != nil {
 		return common.Hash{}, err
+	}
+	if tx.Type() == types.SystemTxType {
+		return common.Hash{}, errors.New("system transaction type is forbidden via RPC")
 	}
 	header := api.b.CurrentHeader()
 	state, _, err := api.b.StateAndHeaderByNumber(ctx, rpc.BlockNumber(header.Number.Int64()))
