@@ -181,7 +181,7 @@ func TestIsSystemTransactionStrictShapeAndRecipients(t *testing.T) {
 		R:        big.NewInt(0),
 		S:        big.NewInt(0),
 	})
-	if ok, err := engine.IsSystemTransaction(bad, header); err == nil || ok {
-		t.Fatalf("expected invalid system tx to error, ok=%v err=%v", ok, err)
+	if ok, err := engine.IsSystemTransaction(bad, header); err != nil || ok {
+		t.Fatalf("expected invalid system tx to be ignored, ok=%v err=%v", ok, err)
 	}
 }

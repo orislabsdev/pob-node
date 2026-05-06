@@ -147,10 +147,10 @@ func (p *PoB) IsSystemTransaction(tx *types.Transaction, header *types.Header) (
 
 	// Strict system-tx shape checks to prevent consensus bypass via "extra" unsigned txs.
 	if tx.Gas() != 0 || tx.GasPrice().Sign() != 0 || len(tx.Data()) != 0 {
-		return false, fmt.Errorf("invalid PoB system tx shape: gas=%d gasPrice=%s dataLen=%d", tx.Gas(), tx.GasPrice(), len(tx.Data()))
+		return false, nil
 	}
 	if tx.To() == nil {
-		return false, fmt.Errorf("invalid PoB system tx: missing to")
+		return false, nil
 	}
 	// For rewards: PoBRewardAddress -> Coinbase
 	if *tx.To() == header.Coinbase {
@@ -160,7 +160,7 @@ func (p *PoB) IsSystemTransaction(tx *types.Transaction, header *types.Header) (
 	if p.chainConfig.PobTraceBurn && *tx.To() == params.PoBBurnAddress {
 		return true, nil
 	}
-	return false, fmt.Errorf("invalid PoB system tx recipient: %s", tx.To().Hex())
+	return false, nil
 }
 
 // IsSystemContract reports whether the address is a system contract.
@@ -542,6 +542,7 @@ func (p *PoB) Finalize(chain consensus.ChainHeaderReader, header *types.Header, 
 
 	// Process PoB system transactions (reward [+ optional burn]).
 	// These must be placed at the START of the block, in a fixed count and order.
+	accStart := state.GetBalance(params.PoBRewardAddress)
 	wantSystem := 1
 	if p.chainConfig.PobTraceBurn {
 		wantSystem = 2
@@ -574,10 +575,6 @@ func (p *PoB) Finalize(chain consensus.ChainHeaderReader, header *types.Header, 
 		if burnTx.Nonce() != wantRewardNonce+1 {
 			return fmt.Errorf("invalid PoB burn tx nonce: have=%d want=%d", burnTx.Nonce(), wantRewardNonce+1)
 		}
-		wantBurn = state.GetBalance(params.PoBRewardAddress).ToBig()
-		if burnTx.Value().Cmp(wantBurn) != 0 {
-			return fmt.Errorf("invalid PoB burn tx value: have=%s want=%s", burnTx.Value(), wantBurn)
-		}
 	}
 
 	// Apply system txs in fixed order after validation.
@@ -586,6 +583,20 @@ func (p *PoB) Finalize(chain consensus.ChainHeaderReader, header *types.Header, 
 	if err := p.applyTransaction(rewardTx, state, header, &systemTxList, &systemReceipts, usedGas, false, tracer); err != nil {
 		return err
 	}
+
+	// After applying the reward, validate the burn amount against the accumulator delta.
+	if burnTx != nil {
+		accAfterReward := state.GetBalance(params.PoBRewardAddress)
+		if accAfterReward.Cmp(accStart) > 0 {
+			wantBurn = new(big.Int).Sub(accAfterReward.ToBig(), accStart.ToBig())
+		} else {
+			wantBurn = common.Big0
+		}
+		if burnTx.Value().Cmp(wantBurn) != 0 {
+			return fmt.Errorf("invalid PoB burn tx value: have=%s want=%s", burnTx.Value(), wantBurn)
+		}
+	}
+
 	if burnTx != nil {
 		if err := p.applyTransaction(burnTx, state, header, &systemTxList, &systemReceipts, usedGas, false, tracer); err != nil {
 			return err
@@ -656,20 +667,27 @@ func (p *PoB) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *typ
 		return nil, nil, fmt.Errorf("invalid PoB reward tx value: have=%s want=%s", rewardTx.Value(), wantReward)
 	}
 	var burnTx *types.Transaction
+	accStart := state.GetBalance(params.PoBRewardAddress)
 	if wantSystem == 2 {
 		burnTx = systemTxs[1]
-		wantBurn := state.GetBalance(params.PoBRewardAddress).ToBig()
 		if burnTx.Nonce() != wantRewardNonce+1 {
 			return nil, nil, fmt.Errorf("invalid PoB burn tx nonce: have=%d want=%d", burnTx.Nonce(), wantRewardNonce+1)
-		}
-		if burnTx.Value().Cmp(wantBurn) != 0 {
-			return nil, nil, fmt.Errorf("invalid PoB burn tx value: have=%s want=%s", burnTx.Value(), wantBurn)
 		}
 	}
 
 	var systemReceipts []*types.Receipt
 	if err := p.applyTransaction(rewardTx, state, header, &txs, &systemReceipts, &usedGas, true, tracer); err != nil {
 		return nil, nil, err
+	}
+	if burnTx != nil {
+		accAfterReward := state.GetBalance(params.PoBRewardAddress)
+		wantBurn := common.Big0
+		if accAfterReward.Cmp(accStart) > 0 {
+			wantBurn = new(big.Int).Sub(accAfterReward.ToBig(), accStart.ToBig())
+		}
+		if burnTx.Value().Cmp(wantBurn) != 0 {
+			return nil, nil, fmt.Errorf("invalid PoB burn tx value: have=%s want=%s", burnTx.Value(), wantBurn)
+		}
 	}
 	if burnTx != nil {
 		if err := p.applyTransaction(burnTx, state, header, &txs, &systemReceipts, &usedGas, true, tracer); err != nil {
