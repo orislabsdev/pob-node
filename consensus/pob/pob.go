@@ -614,20 +614,27 @@ func (p *PoB) applyTransaction(tx *types.Transaction, state vm.StateDB, header *
 	p.UpdateIssuedRewards(state, reward, header.Number.Uint64())
 	
 	// 4. Create receipt
-	receipt := &types.Receipt{
-		Type:              types.LegacyTxType,
-		Status:            types.ReceiptStatusSuccessful,
-		CumulativeGasUsed: *usedGas,
+	receipt := systemRewardReceipt(tx, header)
+	*receipts = append(*receipts, receipt)
+	*txs = append(*txs, tx)
+	
+	return nil
+}
+
+func systemRewardReceipt(tx *types.Transaction, header *types.Header) *types.Receipt {
+	return &types.Receipt{
+		Type:   types.LegacyTxType,
+		Status: types.ReceiptStatusSuccessful,
+		// PoB system txs are placed at the start of the block and consume no gas,
+		// so their cumulative gas used must be 0 to preserve correct per-tx gasUsed
+		// derivation for subsequent user tx receipts.
+		CumulativeGasUsed: 0,
 		Bloom:             types.Bloom{},
 		TxHash:            tx.Hash(),
 		GasUsed:           0,
 		BlockNumber:       header.Number,
 		BlockHash:         header.Hash(),
 	}
-	*receipts = append(*receipts, receipt)
-	*txs = append(*txs, tx)
-	
-	return nil
 }
 
 func (p *PoB) addCandidate(addr common.Address) {

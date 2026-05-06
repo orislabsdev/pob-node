@@ -90,3 +90,36 @@ func TestSealHash(t *testing.T) {
 		t.Errorf("SealHash should NOT depend on signature suffix")
 	}
 }
+
+func TestSystemRewardReceiptCumulativeGasUsedIsZero(t *testing.T) {
+	coinbase := common.HexToAddress("0xd29Cb528C4d8Bc5890dCD505fE211E0F8Fefaf78")
+	header := &types.Header{
+		ParentHash: common.Hash{0x1},
+		Coinbase:   coinbase,
+		Number:     big.NewInt(73),
+		Time:       1000,
+		Extra:      append(make([]byte, extraVanity), make([]byte, extraSeal)...),
+	}
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce:    72,
+		GasPrice: big.NewInt(0),
+		Gas:      0,
+		To:       &coinbase,
+		Value:    big.NewInt(1),
+		Data:     nil,
+		V:        big.NewInt(0),
+		R:        big.NewInt(0),
+		S:        big.NewInt(0),
+	})
+
+	receipt := systemRewardReceipt(tx, header)
+	if receipt.CumulativeGasUsed != 0 {
+		t.Fatalf("expected system receipt cumulativeGasUsed=0, got %d", receipt.CumulativeGasUsed)
+	}
+	if receipt.GasUsed != 0 {
+		t.Fatalf("expected system receipt gasUsed=0, got %d", receipt.GasUsed)
+	}
+	if receipt.TxHash != tx.Hash() {
+		t.Fatalf("expected receipt TxHash=%s, got %s", tx.Hash(), receipt.TxHash)
+	}
+}
