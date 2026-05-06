@@ -1568,6 +1568,7 @@ type RPCTransaction struct {
 	Type                hexutil.Uint64               `json:"type"`
 	Accesses            *types.AccessList            `json:"accessList,omitempty"`
 	ChainID             *hexutil.Big                 `json:"chainId,omitempty"`
+	SystemKind          *hexutil.Uint64              `json:"systemKind,omitempty"`
 	BlobVersionedHashes []common.Hash                `json:"blobVersionedHashes,omitempty"`
 	AuthorizationList   []types.SetCodeAuthorization `json:"authorizationList,omitempty"`
 	V                   *hexutil.Big                 `json:"v"`
@@ -1672,6 +1673,18 @@ func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber
 			result.GasPrice = (*hexutil.Big)(tx.GasFeeCap())
 		}
 		result.AuthorizationList = tx.SetCodeAuthorizations()
+
+	case types.SystemTxType:
+		// PoB system typed tx (EIP-2718 style).
+		// Include chainId + systemKind so downstream clients can decode it into a types.Transaction.
+		result.ChainID = (*hexutil.Big)(tx.ChainId())
+
+		systemKind, isSystemKind := tx.SystemKind()
+		if isSystemKind {
+			kind := hexutil.Uint64(systemKind)
+
+			result.SystemKind = &kind
+		}
 	}
 	return result
 }
