@@ -291,22 +291,22 @@ func (eth *Ethereum) stateAtTransaction(ctx context.Context, block *types.Block,
 		}
 		// Assemble the transaction call message and return if the requested offset
 		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		var isSystemTx bool
+		if posa, ok := eth.Engine().(consensus.PoSA); ok {
+			isSystemTx, _ = posa.IsSystemTransaction(tx, block.Header())
+		}
+
+		if isSystemTx {
+			// Apply the PoB reward transfer effect directly.
+			to := tx.To()
+			statedb.AddBalance(*to, uint256.MustFromBig(tx.Value()), tracing.BalanceIncreasePoBValidatorReward)
+			statedb.SetNonce(params.PoBRewardAddress, tx.Nonce()+1, tracing.NonceChangePoBSystem)
+			statedb.Finalise(eth.blockchain.Config().IsEIP158(block.Number()))
+			continue
+		}
+
 		if err != nil {
-			// PoB system transactions are unsigned and not executed in the EVM. During state
-			// re-exec, we still need to advance state for tracing other txs. Apply the system
-			// tx effects directly instead of feeding it through ApplyMessage (which would
-			// enforce baseFee checks and fail because gas fields are zero).
-			if !beforeSystemTx && errors.Is(err, types.ErrInvalidSig) {
-				// Apply the PoB reward transfer effect.
-				to := tx.To()
-				statedb.AddBalance(*to, uint256.MustFromBig(tx.Value()), tracing.BalanceIncreasePoBValidatorReward)
-				statedb.SetNonce(params.PoBRewardAddress, tx.Nonce()+1, tracing.NonceChangePoBSystem)
-				// Finalise and continue.
-				statedb.Finalise(eth.blockchain.Config().IsEIP158(block.Number()))
-				continue
-			} else {
-				return nil, vm.BlockContext{}, nil, nil, fmt.Errorf("transaction %#x failed: %v", tx.Hash(), err)
-			}
+			return nil, vm.BlockContext{}, nil, nil, fmt.Errorf("transaction %#x failed: %v", tx.Hash(), err)
 		}
 		// Not yet the searched for transaction, execute on top of the current state
 		statedb.SetTxContext(tx.Hash(), idx)

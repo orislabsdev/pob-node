@@ -582,8 +582,9 @@ func (api *API) IntermediateRoots(ctx context.Context, hash common.Hash, config 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		var isSystemTx bool
 		if posa, ok := api.backend.Engine().(consensus.PoSA); ok {
-			if isSystem, _ := posa.IsSystemTransaction(tx, block.Header()); isSystem {
+			if isSystemTx, _ = posa.IsSystemTransaction(tx, block.Header()); isSystemTx {
 				balance := statedb.GetBalance(consensus.SystemAddress)
 				if balance.Cmp(common.U2560) > 0 {
 					statedb.SetBalance(consensus.SystemAddress, uint256.NewInt(0), tracing.BalanceChangeUnspecified)
@@ -598,11 +599,10 @@ func (api *API) IntermediateRoots(ctx context.Context, hash common.Hash, config 
 		}
 
 		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		if isSystemTx {
+			continue
+		}
 		if err != nil {
-			// Skip PoB unsigned system txs when generating intermediate roots.
-			if !beforeSystemTx && errors.Is(err, types.ErrInvalidSig) {
-				continue
-			}
 			return roots, err
 		}
 		if !beforeSystemTx {
@@ -691,15 +691,16 @@ func (api *API) traceBlock(ctx context.Context, block *types.Block, config *Trac
 	)
 	for i, tx := range txs {
 		// upgrade built-in system contract before system txs if Feynman is enabled
-		if beforeSystemTx {
-			if posa, ok := api.backend.Engine().(consensus.PoSA); ok {
-				if isSystem, _ := posa.IsSystemTransaction(tx, block.Header()); isSystem {
-					balance := statedb.GetBalance(consensus.SystemAddress)
-					if balance.Cmp(common.U2560) > 0 {
-						statedb.SetBalance(consensus.SystemAddress, uint256.NewInt(0), tracing.BalanceChangeUnspecified)
-						statedb.AddBalance(blockCtx.Coinbase, balance, tracing.BalanceChangeUnspecified)
-					}
+		var isSystemTx bool
+		if posa, ok := api.backend.Engine().(consensus.PoSA); ok {
+			if isSystemTx, _ = posa.IsSystemTransaction(tx, block.Header()); isSystemTx {
+				balance := statedb.GetBalance(consensus.SystemAddress)
+				if balance.Cmp(common.U2560) > 0 {
+					statedb.SetBalance(consensus.SystemAddress, uint256.NewInt(0), tracing.BalanceChangeUnspecified)
+					statedb.AddBalance(blockCtx.Coinbase, balance, tracing.BalanceChangeUnspecified)
+				}
 
+				if beforeSystemTx {
 					systemcontracts.TryUpdateBuildInSystemContract(api.backend.ChainConfig(), block.Number(), parent.Time(), block.Time(), statedb, false)
 					beforeSystemTx = false
 				}
@@ -708,11 +709,10 @@ func (api *API) traceBlock(ctx context.Context, block *types.Block, config *Trac
 
 		// Generate the next state snapshot fast without tracing
 		msg, err := core.TransactionToMessage(tx, signer, block.BaseFee())
+		if isSystemTx {
+			continue
+		}
 		if err != nil {
-			// Skip PoB unsigned system txs during tracing reexec.
-			if !beforeSystemTx && errors.Is(err, types.ErrInvalidSig) {
-				continue
-			}
 			return nil, err
 		}
 		txctx := &Context{
@@ -1037,13 +1037,10 @@ func (api *API) TraceTransaction(ctx context.Context, hash common.Hash, config *
 	}
 
 	msg, err := core.TransactionToMessage(tx, types.MakeSigner(api.backend.ChainConfig(), block.Number(), block.Time()), block.BaseFee())
+	if isSystemTx {
+		return syntheticSystemTxTrace(tx, config), nil
+	}
 	if err != nil {
-		// PoB system transactions are unsigned and not executed in the EVM (they are applied
-		// directly in the consensus engine). Some explorers still call debug_traceTransaction
-		// for these txs; return a synthetic "empty" trace instead of bubbling signature errors.
-		if isSystemTx && errors.Is(err, types.ErrInvalidSig) {
-			return syntheticSystemTxTrace(tx, config), nil
-		}
 		return nil, err
 	}
 

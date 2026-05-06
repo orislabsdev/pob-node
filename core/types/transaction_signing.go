@@ -148,6 +148,14 @@ func Sender(signer Signer, tx *Transaction) (common.Address, error) {
 		}
 	}
 
+	// Support for PoB system transactions which are unsigned.
+	v, r, s := tx.RawSignatureValues()
+	if v.Sign() == 0 && r.Sign() == 0 && s.Sign() == 0 {
+		addr := params.PoBRewardAddress
+		tx.from.Store(&sigCache{signer: signer, from: addr})
+		return addr, nil
+	}
+
 	addr, err := signer.Sender(tx)
 	if err != nil {
 		return common.Address{}, err

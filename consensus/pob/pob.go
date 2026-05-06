@@ -518,13 +518,22 @@ func (p *PoB) Finalize(chain consensus.ChainHeaderReader, header *types.Header, 
 	uncles []*types.Header, withdrawals []*types.Withdrawal, receipts *[]*types.Receipt, systemTxs *[]*types.Transaction, usedGas *uint64, tracer *tracing.Hooks) error {
 	p.trackActivity(header, txs)
 
-	// Process any system transactions (e.g. block rewards)
+	// Process any system transactions (e.g. block rewards).
+	// PoB system txs are placed at the START of the block (index 0), so their
+	// receipts must be prepended to preserve the TransactionIndex ordering.
+	var systemReceipts []*types.Receipt
+	var systemTxList []*types.Transaction
 	for len(*systemTxs) > 0 {
 		tx := (*systemTxs)[0]
 		*systemTxs = (*systemTxs)[1:]
-		if err := p.applyTransaction(tx, state, header, txs, receipts, usedGas, false, tracer); err != nil {
+		if err := p.applyTransaction(tx, state, header, &systemTxList, &systemReceipts, usedGas, false, tracer); err != nil {
 			return err
 		}
+	}
+	if len(systemReceipts) > 0 {
+		// Prepend system txs and their receipts so they align with block index 0.
+		*txs = append(systemTxList, *txs...)
+		*receipts = append(systemReceipts, *receipts...)
 	}
 	return nil
 }
@@ -541,8 +550,9 @@ func (p *PoB) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *typ
 		usedGas = header.GasUsed
 	)
 	
-	// We need a temporary receipts slice to avoid modifying the input one incorrectly,
-	// then we'll append the new receipts to the original one.
+	// Process system transactions and collect their receipts separately.
+	// PoB system txs are placed at the START of the block (index 0), so their
+	// receipts must be prepended before user tx receipts to preserve TransactionIndex ordering.
 	var systemReceipts []*types.Receipt
 	
 	for _, tx := range body.Transactions {
@@ -552,7 +562,8 @@ func (p *PoB) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *typ
 			}
 		}
 	}
-	receipts = append(receipts, systemReceipts...)
+	// Prepend system receipts so they align with the block tx index (system txs come first).
+	receipts = append(systemReceipts, receipts...)
 	header.GasUsed = usedGas
 	
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
