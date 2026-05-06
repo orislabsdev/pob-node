@@ -46,9 +46,11 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
-	"github.com/holiman/uint256"
 	lru "github.com/hashicorp/golang-lru"
+	"github.com/holiman/uint256"
 )
+
+var registerSelector = crypto.Keccak256([]byte("registerValidator()"))[:4]
 
 const (
 	inmemorySnapshots  = 128  // number of recent snapshots to keep in memory
@@ -87,15 +89,15 @@ type PoB struct {
 
 	proposals map[common.Address]bool // current list of proposals we are pushing
 
-	signer      common.Address // Ethereum address of the signing key
-	signFn      SignerFn       // Signer function to authorise hashes with
-	lock        sync.RWMutex   // Protects the signer and proposals fields
+	signer common.Address // Ethereum address of the signing key
+	signFn SignerFn       // Signer function to authorise hashes with
+	lock   sync.RWMutex   // Protects the signer and proposals fields
 
 	ethAPI      *ethapi.BlockChainAPI
 	genesisHash common.Hash
 
-	candidates  map[common.Address]struct{} // addresses seen active on chain
-	candLock    sync.RWMutex
+	candidates map[common.Address]struct{} // addresses seen active on chain
+	candLock   sync.RWMutex
 
 	fakeDiff bool // Skip difficulty verifications
 }
@@ -143,12 +145,22 @@ func (p *PoB) IsSystemTransaction(tx *types.Transaction, header *types.Header) (
 		return false, nil
 	}
 
+	// Strict system-tx shape checks to prevent consensus bypass via "extra" unsigned txs.
+	if tx.Gas() != 0 || tx.GasPrice().Sign() != 0 || len(tx.Data()) != 0 {
+		return false, fmt.Errorf("invalid PoB system tx shape: gas=%d gasPrice=%s dataLen=%d", tx.Gas(), tx.GasPrice(), len(tx.Data()))
+	}
+	if tx.To() == nil {
+		return false, fmt.Errorf("invalid PoB system tx: missing to")
+	}
 	// For rewards: PoBRewardAddress -> Coinbase
-	if tx.To() != nil && *tx.To() == header.Coinbase {
+	if *tx.To() == header.Coinbase {
 		return true, nil
 	}
-	
-	return false, nil
+	// For burn: PoBRewardAddress -> dead address (optional feature).
+	if p.chainConfig.PobTraceBurn && *tx.To() == params.PoBBurnAddress {
+		return true, nil
+	}
+	return false, fmt.Errorf("invalid PoB system tx recipient: %s", tx.To().Hex())
 }
 
 // IsSystemContract reports whether the address is a system contract.
@@ -213,7 +225,6 @@ func (p *PoB) EstimateGasReservedForSystemTxs(chain consensus.ChainHeaderReader,
 }
 
 var candidatesKey = []byte("pob-candidates")
-
 
 func (p *PoB) loadCandidates() {
 	p.candLock.Lock()
@@ -414,7 +425,6 @@ func (p *PoB) snapshot(chain consensus.ChainHeaderReader, number uint64, hash co
 	}
 
 	snap, err = parentSnap.apply([]*types.Header{header}, p, func() []Candidate {
-		// Pool refresh logic
 		p.candLock.RLock()
 		var addrs []common.Address
 		for addr := range p.candidates {
@@ -427,6 +437,18 @@ func (p *PoB) snapshot(chain consensus.ChainHeaderReader, number uint64, hash co
 			log.Error("PoB: failed to get state for pool refresh", "err", err, "hash", hash)
 			return nil
 		}
+
+		// Evict validators who have spent down their balance before rebuilding the pool.
+		p.pruneCandidates(st)
+
+		// Re-read the pruned candidate list.
+		p.candLock.RLock()
+		addrs = addrs[:0]
+		for addr := range p.candidates {
+			addrs = append(addrs, addr)
+		}
+		p.candLock.RUnlock()
+
 		return p.BuildPool(st, addrs)
 	})
 	if err != nil {
@@ -518,15 +540,54 @@ func (p *PoB) Finalize(chain consensus.ChainHeaderReader, header *types.Header, 
 	uncles []*types.Header, withdrawals []*types.Withdrawal, receipts *[]*types.Receipt, systemTxs *[]*types.Transaction, usedGas *uint64, tracer *tracing.Hooks) error {
 	p.trackActivity(header, txs)
 
-	// Process any system transactions (e.g. block rewards).
-	// PoB system txs are placed at the START of the block (index 0), so their
-	// receipts must be prepended to preserve the TransactionIndex ordering.
+	// Process PoB system transactions (reward [+ optional burn]).
+	// These must be placed at the START of the block, in a fixed count and order.
+	wantSystem := 1
+	if p.chainConfig.PobTraceBurn {
+		wantSystem = 2
+	}
+	if have := len(*systemTxs); have != wantSystem {
+		return fmt.Errorf("invalid PoB system tx count: have=%d want=%d", have, wantSystem)
+	}
+
+	// Validate reward tx against consensus rules.
+	rewardTx := (*systemTxs)[0]
+	if rewardTx.To() == nil || *rewardTx.To() != header.Coinbase {
+		return fmt.Errorf("invalid PoB reward tx recipient: %v", rewardTx.To())
+	}
+	wantRewardNonce := state.GetNonce(params.PoBRewardAddress)
+	if rewardTx.Nonce() != wantRewardNonce {
+		return fmt.Errorf("invalid PoB reward tx nonce: have=%d want=%d", rewardTx.Nonce(), wantRewardNonce)
+	}
+	wantReward := p.CalculateReward(header.Number.Uint64(), state)
+	if rewardTx.Value().Cmp(wantReward) != 0 {
+		return fmt.Errorf("invalid PoB reward tx value: have=%s want=%s", rewardTx.Value(), wantReward)
+	}
+
+	var burnTx *types.Transaction
+	var wantBurn *big.Int
+	if wantSystem == 2 {
+		burnTx = (*systemTxs)[1]
+		if burnTx.To() == nil || *burnTx.To() != params.PoBBurnAddress {
+			return fmt.Errorf("invalid PoB burn tx recipient: %v", burnTx.To())
+		}
+		if burnTx.Nonce() != wantRewardNonce+1 {
+			return fmt.Errorf("invalid PoB burn tx nonce: have=%d want=%d", burnTx.Nonce(), wantRewardNonce+1)
+		}
+		wantBurn = state.GetBalance(params.PoBRewardAddress).ToBig()
+		if burnTx.Value().Cmp(wantBurn) != 0 {
+			return fmt.Errorf("invalid PoB burn tx value: have=%s want=%s", burnTx.Value(), wantBurn)
+		}
+	}
+
+	// Apply system txs in fixed order after validation.
 	var systemReceipts []*types.Receipt
 	var systemTxList []*types.Transaction
-	for len(*systemTxs) > 0 {
-		tx := (*systemTxs)[0]
-		*systemTxs = (*systemTxs)[1:]
-		if err := p.applyTransaction(tx, state, header, &systemTxList, &systemReceipts, usedGas, false, tracer); err != nil {
+	if err := p.applyTransaction(rewardTx, state, header, &systemTxList, &systemReceipts, usedGas, false, tracer); err != nil {
+		return err
+	}
+	if burnTx != nil {
+		if err := p.applyTransaction(burnTx, state, header, &systemTxList, &systemReceipts, usedGas, false, tracer); err != nil {
 			return err
 		}
 	}
@@ -535,6 +596,8 @@ func (p *PoB) Finalize(chain consensus.ChainHeaderReader, header *types.Header, 
 		*txs = append(systemTxList, *txs...)
 		*receipts = append(systemReceipts, *receipts...)
 	}
+	userTxs := (*txs)[wantSystem:]
+	p.processRegistrations(header, userTxs, state)
 	return nil
 }
 
@@ -549,23 +612,77 @@ func (p *PoB) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *typ
 		txs     = make([]*types.Transaction, 0) // This will be filled by applyTransaction
 		usedGas = header.GasUsed
 	)
-	
-	// Process system transactions and collect their receipts separately.
-	// PoB system txs are placed at the START of the block (index 0), so their
+
+	// Process PoB system transactions (reward [+ optional burn]) and collect their receipts separately.
+	// PoB system txs must be placed at the START of the block (index 0..), so their
 	// receipts must be prepended before user tx receipts to preserve TransactionIndex ordering.
+	wantSystem := 1
+	if p.chainConfig.PobTraceBurn {
+		wantSystem = 2
+	}
+	if len(body.Transactions) < wantSystem {
+		return nil, nil, fmt.Errorf("missing PoB system transactions: have=%d want=%d", len(body.Transactions), wantSystem)
+	}
+
+	// Validate that the first N txs are valid PoB system txs and that no system txs appear later.
+	systemTxs := body.Transactions[:wantSystem]
+	for i, tx := range systemTxs {
+		isSystem, err := p.IsSystemTransaction(tx, header)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !isSystem {
+			return nil, nil, fmt.Errorf("missing PoB system transaction at index %d", i)
+		}
+	}
+	for i, tx := range body.Transactions[wantSystem:] {
+		isSystem, err := p.IsSystemTransaction(tx, header)
+		if err != nil {
+			return nil, nil, err
+		}
+		if isSystem {
+			return nil, nil, fmt.Errorf("unexpected PoB system transaction at index %d", wantSystem+i)
+		}
+	}
+
+	// Consensus validation of system tx contents.
+	rewardTx := systemTxs[0]
+	wantRewardNonce := state.GetNonce(params.PoBRewardAddress)
+	wantReward := p.CalculateReward(header.Number.Uint64(), state)
+	if rewardTx.Nonce() != wantRewardNonce {
+		return nil, nil, fmt.Errorf("invalid PoB reward tx nonce: have=%d want=%d", rewardTx.Nonce(), wantRewardNonce)
+	}
+	if rewardTx.Value().Cmp(wantReward) != 0 {
+		return nil, nil, fmt.Errorf("invalid PoB reward tx value: have=%s want=%s", rewardTx.Value(), wantReward)
+	}
+	var burnTx *types.Transaction
+	if wantSystem == 2 {
+		burnTx = systemTxs[1]
+		wantBurn := state.GetBalance(params.PoBRewardAddress).ToBig()
+		if burnTx.Nonce() != wantRewardNonce+1 {
+			return nil, nil, fmt.Errorf("invalid PoB burn tx nonce: have=%d want=%d", burnTx.Nonce(), wantRewardNonce+1)
+		}
+		if burnTx.Value().Cmp(wantBurn) != 0 {
+			return nil, nil, fmt.Errorf("invalid PoB burn tx value: have=%s want=%s", burnTx.Value(), wantBurn)
+		}
+	}
+
 	var systemReceipts []*types.Receipt
-	
-	for _, tx := range body.Transactions {
-		if isSystem, _ := p.IsSystemTransaction(tx, header); isSystem {
-			if err := p.applyTransaction(tx, state, header, &txs, &systemReceipts, &usedGas, true, tracer); err != nil {
-				return nil, nil, err
-			}
+	if err := p.applyTransaction(rewardTx, state, header, &txs, &systemReceipts, &usedGas, true, tracer); err != nil {
+		return nil, nil, err
+	}
+	if burnTx != nil {
+		if err := p.applyTransaction(burnTx, state, header, &txs, &systemReceipts, &usedGas, true, tracer); err != nil {
+			return nil, nil, err
 		}
 	}
 	// Prepend system receipts so they align with the block tx index (system txs come first).
 	receipts = append(systemReceipts, receipts...)
 	header.GasUsed = usedGas
-	
+
+	userTxs := body.Transactions[wantSystem:]
+	p.processRegistrations(header, userTxs, state)
+
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 
 	// Ensure WithdrawalsHash is set if Shanghai is active by providing an empty slice if nil.
@@ -597,28 +714,57 @@ func (p *PoB) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *typ
 }
 
 func (p *PoB) applyTransaction(tx *types.Transaction, state vm.StateDB, header *types.Header, txs *[]*types.Transaction, receipts *[]*types.Receipt, usedGas *uint64, mining bool, tracer *tracing.Hooks) error {
-	// For PoB, system transactions are block rewards from PoBRewardAddress to Coinbase
-	if to := tx.To(); to == nil || *to != header.Coinbase {
-		return fmt.Errorf("invalid system transaction recipient: %v", to)
+	to := tx.To()
+	if to == nil {
+		return fmt.Errorf("invalid PoB system transaction: missing recipient")
 	}
-	
-	reward := tx.Value()
-	
-	// 1. Update state: add balance to coinbase
-	state.AddBalance(header.Coinbase, uint256.MustFromBig(reward), tracing.BalanceIncreasePoBValidatorReward)
-	
-	// 2. Update nonce of system reward address
-	state.SetNonce(params.PoBRewardAddress, tx.Nonce()+1, tracing.NonceChangePoBSystem)
-	
-	// 3. Update issued rewards tracking
-	p.UpdateIssuedRewards(state, reward, header.Number.Uint64())
-	
-	// 4. Create receipt
-	receipt := systemRewardReceipt(tx, header)
-	*receipts = append(*receipts, receipt)
-	*txs = append(*txs, tx)
-	
-	return nil
+
+	// Reward: PoBRewardAddress -> Coinbase
+	if *to == header.Coinbase {
+		reward := tx.Value()
+
+		// 1. Update state: add balance to coinbase
+		if reward.Sign() > 0 {
+			state.AddBalance(header.Coinbase, uint256.MustFromBig(reward), tracing.BalanceIncreasePoBValidatorReward)
+		}
+
+		// 2. Update nonce of system reward address
+		state.SetNonce(params.PoBRewardAddress, tx.Nonce()+1, tracing.NonceChangePoBSystem)
+
+		// 3. Update issued rewards tracking
+		p.UpdateIssuedRewards(state, reward, header.Number.Uint64())
+
+		// 4. Create receipt
+		receipt := systemRewardReceipt(tx, header)
+		*receipts = append(*receipts, receipt)
+		*txs = append(*txs, tx)
+		return nil
+	}
+
+	// Burn: PoBRewardAddress -> dead address (optional).
+	if p.chainConfig.PobTraceBurn && *to == params.PoBBurnAddress {
+		amount := tx.Value()
+		if amount.Sign() < 0 {
+			return fmt.Errorf("invalid PoB burn amount: %s", amount)
+		}
+		if amount.Sign() > 0 {
+			want := uint256.MustFromBig(amount)
+			have := state.GetBalance(params.PoBRewardAddress)
+			if have.Cmp(want) < 0 {
+				return fmt.Errorf("invalid PoB burn amount: have=%s want=%s", have, want)
+			}
+			state.SubBalance(params.PoBRewardAddress, want, tracing.BalanceDecreasePoBSystemFee)
+			state.AddBalance(params.PoBBurnAddress, want, tracing.BalanceChangeTransfer)
+		}
+		state.SetNonce(params.PoBRewardAddress, tx.Nonce()+1, tracing.NonceChangePoBSystem)
+
+		receipt := systemRewardReceipt(tx, header)
+		*receipts = append(*receipts, receipt)
+		*txs = append(*txs, tx)
+		return nil
+	}
+
+	return fmt.Errorf("invalid PoB system transaction recipient: %s", to.Hex())
 }
 
 func systemRewardReceipt(tx *types.Transaction, header *types.Header) *types.Receipt {
@@ -652,37 +798,67 @@ func (p *PoB) addCandidate(addr common.Address) {
 }
 
 func (p *PoB) trackActivity(header *types.Header, txs *[]*types.Transaction) {
-	p.candLock.Lock()
-	changed := false
-
-	// Always track the block proposer
-	if header != nil {
-		if _, ok := p.candidates[header.Coinbase]; !ok {
-			p.candidates[header.Coinbase] = struct{}{}
-			changed = true
-		}
+	// Only the block proposer is auto-registered; all other addresses must
+	// call registerValidator() explicitly.
+	if header == nil || header.Coinbase == (common.Address{}) {
+		return
 	}
+	p.addCandidate(header.Coinbase)
+}
 
-	// Track transaction senders and recipients
-	if txs != nil {
-		for _, tx := range *txs {
-			if sender, err := types.LatestSigner(p.chainConfig).Sender(tx); err == nil {
-				if _, ok := p.candidates[sender]; !ok {
-					p.candidates[sender] = struct{}{}
-					changed = true
-				}
-			}
-			if to := tx.To(); to != nil {
-				if _, ok := p.candidates[*to]; !ok {
-					p.candidates[*to] = struct{}{}
-					changed = true
-				}
-			}
+// processRegistrations scans block transactions for explicit validator
+// registration calls (registerValidator() sent to PoBRewardAddress).
+// Only senders with balance ≥ MinBalanceWei are admitted.
+func (p *PoB) processRegistrations(header *types.Header, txs []*types.Transaction, st vm.StateDB) {
+	signer := types.LatestSigner(p.chainConfig)
+
+	for _, tx := range txs {
+		// Must be directed at the PoB system address
+		if tx.To() == nil || *tx.To() != params.PoBRewardAddress {
+			continue
+		}
+		// Must carry the registerValidator() selector
+		if len(tx.Data()) < 4 || !bytes.Equal(tx.Data()[:4], registerSelector) {
+			continue
+		}
+		sender, err := signer.Sender(tx)
+		if err != nil {
+			continue // malformed signature — already rejected by the tx pool
+		}
+		// Balance gate: sender must meet the minimum at the time of this block
+		bal := st.GetBalance(sender)
+		if bal == nil {
+			continue
+		}
+		balInt, _ := uint256.FromBig(p.config.MinBalanceWei)
+		if bal.Cmp(balInt) < 0 {
+			log.Debug("PoB: registration rejected — insufficient balance",
+				"addr", sender, "balance", bal, "min", p.config.MinBalanceWei)
+			continue
+		}
+		log.Info("PoB: validator registered", "addr", sender, "balance", bal)
+		p.addCandidate(sender)
+	}
+}
+
+// pruneCandidates removes any candidate whose balance has dropped below
+// MinBalanceWei. Should be called once per epoch during pool refresh.
+func (p *PoB) pruneCandidates(st *state.StateDB) {
+	minBal, _ := uint256.FromBig(p.config.MinBalanceWei)
+
+	p.candLock.Lock()
+	var pruned []common.Address
+	for addr := range p.candidates {
+		bal := st.GetBalance(addr)
+		if bal == nil || bal.Cmp(minBal) < 0 {
+			delete(p.candidates, addr)
+			pruned = append(pruned, addr)
 		}
 	}
 	p.candLock.Unlock()
 
-	if changed {
+	if len(pruned) > 0 {
+		log.Info("PoB: pruned underfunded validators", "count", len(pruned))
 		p.saveCandidates()
 	}
 }

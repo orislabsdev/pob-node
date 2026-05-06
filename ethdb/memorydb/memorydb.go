@@ -48,6 +48,41 @@ type Database struct {
 	stateStore ethdb.Database
 }
 
+// CleanBlock implements [ethdb.Database].
+func (db *Database) CleanBlock(kvStore ethdb.KeyValueStore, start uint64) error {
+	panic("unimplemented")
+}
+
+// GetStateStore implements [ethdb.Database].
+func (db *Database) GetStateStore() ethdb.Database {
+	panic("unimplemented")
+}
+
+// HasSeparateStateStore implements [ethdb.Database].
+func (db *Database) HasSeparateStateStore() bool {
+	panic("unimplemented")
+}
+
+// ResetTableForIncr implements [ethdb.Database].
+func (db *Database) ResetTableForIncr(kind string, startAt uint64, onlyEmpty bool) error {
+	panic("unimplemented")
+}
+
+// SetStateStore implements [ethdb.Database].
+func (db *Database) SetStateStore(state ethdb.Database) {
+	panic("unimplemented")
+}
+
+// SetupFreezerEnv implements [ethdb.Database].
+func (db *Database) SetupFreezerEnv(env *ethdb.FreezerEnv, blockHistory uint64) error {
+	panic("unimplemented")
+}
+
+// SyncAncient implements [ethdb.Database].
+func (db *Database) SyncAncient() error {
+	panic("unimplemented")
+}
+
 func (db *Database) ModifyAncients(f func(ethdb.AncientWriteOp) error) (int64, error) {
 	//TODO implement me
 	panic("implement me")
@@ -464,4 +499,8 @@ func (it *iterator) Value() []byte {
 // be called multiple times without causing error.
 func (it *iterator) Release() {
 	it.index, it.keys, it.values = -1, nil, nil
+}
+
+func (db *Database) AncientDatadir() (string, error) {
+	panic("not supported")
 }

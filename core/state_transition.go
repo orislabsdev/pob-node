@@ -583,6 +583,27 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 			if rules.IsEIP4762 && fee.Sign() != 0 {
 				st.evm.AccessEvents.AddAccount(st.evm.Context.Coinbase, true, math.MaxUint64)
 			}
+		} else {
+			// PoB: accumulate the full gas cost (base fee + tip) on the PoB reward address
+			// so it can later be transferred to the burn (dead) address via a system transaction.
+			//
+			// This makes the burned amount auditable on-chain without changing the amount
+			// paid by the sender.
+			burnFee := new(big.Int).SetUint64(st.gasUsed())
+			burnFee.Mul(burnFee, st.msg.GasPrice)
+			// Include blob fee burn if Cancun is active.
+			if rules.IsCancun {
+				blobFee := new(big.Int).SetUint64(st.blobGasUsed())
+				blobFee.Mul(blobFee, st.evm.Context.BlobBaseFee)
+				burnFee.Add(burnFee, blobFee)
+			}
+			if burnFee.Sign() != 0 {
+				burnFeeU256, _ := uint256.FromBig(burnFee)
+				st.state.AddBalance(params.PoBRewardAddress, burnFeeU256, tracing.BalanceIncreaseRewardTransactionFee)
+				if rules.IsEIP4762 {
+					st.evm.AccessEvents.AddAccount(params.PoBRewardAddress, true, math.MaxUint64)
+				}
+			}
 		}
 	}
 

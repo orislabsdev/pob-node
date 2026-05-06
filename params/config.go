@@ -831,6 +831,12 @@ type ChainConfig struct {
 	HertzfixBlock   *big.Int `json:"hertzfixBlock,omitempty"`   // hertzfixBlock switch block (nil = no fork, 0 = already activated)
 
 	Pob *PoBConfig `json:"pob,omitempty"`
+	// PobTraceBurn enables a PoB "burn" system transaction per block, which moves
+	// the accumulated gas fees from PoBRewardAddress to PoBBurnAddress.
+	//
+	// This is a consensus-affecting flag and must be enabled consistently across
+	// the network via genesis configuration.
+	PobTraceBurn bool `json:"pobTraceBurn,omitempty"`
 	// Various consensus engines
 	Ethash             *EthashConfig       `json:"ethash,omitempty"`
 	Clique             *CliqueConfig       `json:"clique,omitempty"`

@@ -80,6 +80,46 @@ func TestEIP155ChainId(t *testing.T) {
 	}
 }
 
+func TestPoBUnsignedSystemTxSenderDerivation(t *testing.T) {
+	signer := HomesteadSigner{}
+
+	// Unsigned PoB system txs are only recognized when gas=0 and gasPrice=0.
+	tx := NewTx(&LegacyTx{
+		Nonce:    1,
+		GasPrice: big.NewInt(0),
+		Gas:      0,
+		To:       &params.PoBRewardAddress,
+		Value:    big.NewInt(0),
+		Data:     nil,
+		V:        big.NewInt(0),
+		R:        big.NewInt(0),
+		S:        big.NewInt(0),
+	})
+	from, err := Sender(signer, tx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if from != params.PoBRewardAddress {
+		t.Fatalf("expected from=%s, got %s", params.PoBRewardAddress, from)
+	}
+
+	// Unsigned txs with non-zero gas/gasPrice must NOT be treated as PoB system txs.
+	bad := NewTx(&LegacyTx{
+		Nonce:    1,
+		GasPrice: big.NewInt(1),
+		Gas:      21000,
+		To:       &params.PoBRewardAddress,
+		Value:    big.NewInt(0),
+		Data:     nil,
+		V:        big.NewInt(0),
+		R:        big.NewInt(0),
+		S:        big.NewInt(0),
+	})
+	if _, err := Sender(signer, bad); err == nil {
+		t.Fatalf("expected error for unsigned non-system tx")
+	}
+}
+
 func TestEIP155SigningVitalik(t *testing.T) {
 	// Test vectors come from http://vitalik.ca/files/eip155_testvec.txt
 	for i, test := range []struct {

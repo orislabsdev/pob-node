@@ -109,6 +109,12 @@ type environment struct {
 	witness *stateless.Witness
 
 	committed bool
+
+	// PoB burn-tracing: when enabled, a burn system transaction is inserted at index 1
+	// (right after the PoB reward tx at index 0). The actual burn amount is computed
+	// deterministically from state after normal tx execution.
+	pobTraceBurn bool
+	pobBurnStart *uint256.Int
 }
 
 // discard terminates the background prefetcher go-routine. It should
@@ -1035,10 +1041,12 @@ func (w *worker) prepareWork(genParams *generateParams, witness bool) (*environm
 	if w.chainConfig.Pob != nil {
 		if engine, ok := w.engine.(pobEngine); ok {
 			reward := engine.CalculateReward(header.Number.Uint64(), env.state)
-			if reward.Sign() > 0 {
-				w.applyPoBReward(env, reward)
-				// We don't call UpdateIssuedRewards here because it will be called
-				// in the consensus engine's Finalize method when processing the system tx.
+			// Always include the reward system transaction (value may be zero if max supply reached).
+			w.applyPoBReward(env, reward)
+			// We don't call UpdateIssuedRewards here because it will be called
+			// in the consensus engine's Finalize method when processing the system tx.
+			if w.chainConfig.PobTraceBurn {
+				w.applyPoBBurnPlaceholder(env)
 			}
 		}
 	}
@@ -1164,6 +1172,21 @@ func (w *worker) applyPoBReward(env *environment, reward *big.Int) {
 	// It will be applied during Finalize when the block is finalized.
 }
 
+func (w *worker) applyPoBBurnPlaceholder(env *environment) {
+	// Capture the starting accumulator balance for deterministic burn computation.
+	if env.pobBurnStart == nil {
+		env.pobBurnStart = new(uint256.Int).Set(env.state.GetBalance(params.PoBRewardAddress))
+	}
+	env.pobTraceBurn = true
+
+	nonce := env.state.GetNonce(params.PoBRewardAddress) + 1 // immediately after reward system tx
+	tx := types.NewTransaction(nonce, params.PoBBurnAddress, common.Big0, 0, big.NewInt(0), nil)
+
+	env.txs = append(env.txs, tx)
+	env.size += tx.Size()
+	env.tcount++
+}
+
 // generateWork generates a sealing block based on the given parameters.
 func (w *worker) generateWork(genParam *generateParams, witness bool) *newPayloadResult {
 	work, err := w.prepareWork(genParam, witness)
@@ -1194,6 +1217,24 @@ func (w *worker) generateWork(genParam *generateParams, witness bool) *newPayloa
 			log.Warn("Block building is interrupted", "allowance", common.PrettyDuration(w.recommit))
 		}
 	}
+
+	// PoB burn-tracing: update the burn system transaction value (index 1) based on
+	// the accumulator delta observed after executing normal transactions.
+	if w.chainConfig.Pob != nil && w.chainConfig.PobTraceBurn && work.pobTraceBurn && len(work.txs) >= 2 {
+		start := work.pobBurnStart
+		end := work.state.GetBalance(params.PoBRewardAddress)
+		if start != nil && end != nil {
+			var burn uint256.Int
+			if end.Cmp(start) > 0 {
+				burn.Sub(end, start)
+			} else {
+				burn.SetUint64(0)
+			}
+			nonce := work.txs[1].Nonce()
+			work.txs[1] = types.NewTransaction(nonce, params.PoBBurnAddress, burn.ToBig(), 0, big.NewInt(0), nil)
+		}
+	}
+
 	body := types.Body{Transactions: work.txs, Withdrawals: genParam.withdrawals}
 	allLogs := make([]*types.Log, 0)
 	for _, r := range work.receipts {

@@ -119,6 +119,13 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 
 	// usually do have two tx, one for validator set contract, another for system reward contract.
 	systemTxs := make([]*types.Transaction, 0, 2)
+	expectedSystemTxs := 0
+	if config.Pob != nil {
+		expectedSystemTxs = 1
+		if config.PobTraceBurn {
+			expectedSystemTxs = 2
+		}
+	}
 
 	for i, tx := range block.Transactions() {
 		if isPoSA {
@@ -126,8 +133,26 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 				bloomProcessors.Close()
 				return nil, err
 			} else if isSystemTx {
+				// PoB requires system txs to be at the beginning of the block and in a fixed count.
+				if config.Pob != nil {
+					if expectedSystemTxs == 0 {
+						bloomProcessors.Close()
+						return nil, errors.New("unexpected PoB system transaction")
+					}
+					if i >= expectedSystemTxs {
+						bloomProcessors.Close()
+						return nil, fmt.Errorf("unexpected PoB system transaction at index %d", i)
+					}
+					if len(systemTxs) != i {
+						bloomProcessors.Close()
+						return nil, fmt.Errorf("non-contiguous PoB system transactions at index %d", i)
+					}
+				}
 				systemTxs = append(systemTxs, tx)
 				continue
+			} else if config.Pob != nil && i < expectedSystemTxs {
+				bloomProcessors.Close()
+				return nil, fmt.Errorf("missing PoB system transaction at index %d", i)
 			}
 		}
 		if p.chain.Config().IsCancun(block.Number(), block.Time()) {

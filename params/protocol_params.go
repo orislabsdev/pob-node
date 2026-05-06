@@ -233,6 +233,10 @@ var (
 	// PoBRewardAddress is the sender address for block rewards in PoB consensus.
 	PoBRewardAddress = common.HexToAddress("0x0000000000000000000000000000000000001000")
 
+	// PoBBurnAddress is the destination address for burned gas fees in PoB consensus.
+	// Funds are sent here to make burned amounts auditable on-chain.
+	PoBBurnAddress = common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+
 	// EIP-4788 - Beacon block root in the EVM
 	BeaconRootsAddress = common.HexToAddress("0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02")
 	BeaconRootsCode    = common.FromHex("3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500")
