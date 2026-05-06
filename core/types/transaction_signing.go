@@ -511,6 +511,11 @@ func deriveChainId(v *big.Int) *big.Int {
 		if v == 27 || v == 28 {
 			return new(big.Int)
 		}
+		// Handle invalid/unsigned legacy values (e.g. PoB system txs with v=0)
+		// by treating them as unprotected.
+		if v < 35 {
+			return new(big.Int)
+		}
 		return new(big.Int).SetUint64((v - 35) / 2)
 	}
 	vCopy := new(big.Int).Sub(v, big.NewInt(35))
