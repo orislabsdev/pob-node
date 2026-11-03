@@ -19,6 +19,7 @@ package polarysdb
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,14 +28,30 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/polarysfoundation/polarysdb"
-	"github.com/polarysfoundation/polarysdb/modules/tx"
+	"github.com/ethereum/go-ethereum/log"
+	"github.com/polarysfoundation/polarysdb/v2"
 )
 
 const (
 	defaultTable = "pob_chain"
+
+	// maxWriteBatch bounds how many records are handed to the backing store in a
+	// single call. PolarysDB rejects a call with more than 100000 records, so the
+	// limit leaves headroom below that ceiling.
+	maxWriteBatch = 50000
+
+	// persistenceWatchInterval is how often the watchdog compares the writes
+	// handed to the backing store with the progress of its state file.
+	persistenceWatchInterval = 15 * time.Second
+
+	// persistenceStallChecks is the number of consecutive checks without any
+	// progress of the state file that are tolerated before the stall is
+	// reported. Reported stalls repeat at the same cadence.
+	persistenceStallChecks = 4
 )
 
 var (
@@ -45,7 +62,71 @@ var (
 type Database struct {
 	db   *polarysdb.Database
 	path string
-	mu   sync.RWMutex
+
+	// wmu serializes the writes issued by this process, which keeps the WAL in
+	// the order the callers produced it and stops the chunks of one batch from
+	// being interleaved with the writes of another goroutine.
+	wmu sync.Mutex
+
+	// stateFile is the file PolarysDB dumps its in-memory tables to. Mutations
+	// are only durable once that file has been refreshed, so its progress is
+	// watched to surface a backing store that stopped persisting.
+	stateFile string
+
+	// pending counts the mutations accepted since the process started.
+	pending atomic.Uint64
+
+	// closeOnce guards closeCh, which terminates the persistence watchdog.
+	closeOnce sync.Once
+	closeCh   chan struct{}
+}
+
+// stateFile returns the file PolarysDB dumps its tables to. The layout mirrors
+// the path resolution of the backing store itself.
+func stateFile(dir string) string {
+	return filepath.Join(dir, "state", "state.rdb")
+}
+
+// checkPreviousSession refuses to open a brand new database in a directory that
+// already holds chain data.
+//
+// PolarysDB loads a missing state file as an empty database without reporting an
+// error, so a database that was moved, deleted or written under a different
+// path comes up empty and the node silently restarts the chain from genesis
+// instead of failing. Only the combination of a missing state file and chain
+// artifacts of a previous run is treated as an error, a genuinely fresh data
+// directory opens normally.
+func checkPreviousSession(dir string) error {
+	file := stateFile(dir)
+	if _, err := os.Stat(file); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// Without a state file, look for leftovers of a previous session. The ancient
+	// store is per store, while the layer journal lives in the triedb directory
+	// of the geth data directory the store belongs to.
+	for _, artifact := range []struct {
+		name     string
+		isDir    bool
+		contains bool
+	}{
+		{filepath.Join(dir, "ancient", "chain"), true, true},
+		{filepath.Join(filepath.Dir(dir), "triedb", "merkle.journal"), false, false},
+	} {
+		var exists bool
+		if artifact.isDir {
+			entries, err := os.ReadDir(artifact.name)
+			exists = err == nil && (!artifact.contains || len(entries) > 0)
+		} else {
+			_, err := os.Stat(artifact.name)
+			exists = err == nil
+		}
+		if exists {
+			return fmt.Errorf("polarysdb state file %s is missing although %s already holds data of a previous session: refusing to start on an empty database, check the data directory and the user the node runs as", file, artifact.name)
+		}
+	}
+	return nil
 }
 
 // New returns a wrapped PolarysDB object.
@@ -55,21 +136,32 @@ func New(path string, cache int, handles int, namespace string, readonly bool) (
 	h := sha256.Sum256([]byte(absPath))
 	encryptionKey := polarysdb.GenerateKeyFromBytes(h[:])
 
-	cfg := polarysdb.DefaultConfig()
-	home, _ := os.UserHomeDir()
-	relPath, err := filepath.Rel(home, absPath)
-	if err != nil {
-		cfg.DirPath = absPath
-	} else {
-		cfg.DirPath = relPath
+	if err := checkPreviousSession(absPath); err != nil {
+		return nil, err
 	}
+
+	// The backing store resolves relative directories under $HOME, which silently
+	// relocates the database (and its WAL) when the node is started by a service
+	// running as a different user than the one that initialized it. Always hand
+	// it the absolute directory instead.
+	cfg := polarysdb.DefaultConfig()
+	cfg.DirPath = absPath
 	cfg.EncryptionKey = encryptionKey
 
-	// PolarysDB manages WAL and synchronization automatically.
-	cfg.EnableTransactions = true
+	// PolarysDB manages WAL and synchronization automatically. Explicit
+	// transactions are not used: the backing store never logs a commit to its
+	// WAL, so everything written through them is only as durable as the next
+	// full dump of the state file.
+	cfg.EnableTransactions = false
 	cfg.EnableIndexes = false
 	cfg.EnableCompression = true
 	cfg.Debug = true
+
+	// Background backups serialize the whole database into an unencrypted copy
+	// under the backup directory (up to ten of them per database) on every
+	// backup interval. The node keeps its own chain backups and the extra copies
+	// only compete with the periodic save for disk space and I/O.
+	cfg.EnableBackup = false
 
 	db, err := polarysdb.InitWithConfig(cfg)
 	if err != nil {
@@ -77,22 +169,106 @@ func New(path string, cache int, handles int, namespace string, readonly bool) (
 	}
 
 	// Ensure the default table exists
-	if !db.Exist(defaultTable) {
+	exists, err := db.Exist(defaultTable)
+	if err != nil {
+		return nil, err
+	}
+
+	if !exists {
 		if err := db.Create(defaultTable); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
 
-	return &Database{
-		db:   db,
-		path: path,
-	}, nil
+	database := &Database{
+		db:        db,
+		path:      absPath,
+		stateFile: stateFile(absPath),
+		closeCh:   make(chan struct{}),
+	}
+	log.Info("Allocated PolarysDB storage", "dir", absPath, "state_file", database.stateFile)
+	go database.watchPersistence()
+
+	return database, nil
+}
+
+// watchPersistence reports a backing store that stops writing our mutations to
+// its state file.
+//
+// PolarysDB keeps the whole database in memory and appends to the WAL only on
+// its non-transactional write path, so everything committed through a batch
+// becomes durable with the next periodic dump of the state file. That dump
+// fails silently from the perspective of the node (the library logs it through
+// its own console logger, which is easily lost in service logs), which means a
+// full disk or a permission problem costs every block written since the last
+// successful dump without any visible symptom.
+func (d *Database) watchPersistence() {
+	ticker := time.NewTicker(persistenceWatchInterval)
+	defer ticker.Stop()
+
+	var (
+		lastSize int64
+		lastMod  time.Time
+		saved    uint64
+		stalled  int
+	)
+	for {
+		select {
+		case <-d.closeCh:
+			return
+		case <-ticker.C:
+		}
+
+		writes := d.pending.Load()
+		info, err := os.Stat(d.stateFile)
+		if err != nil {
+			if writes > 0 {
+				log.Error("PolarysDB state file is unreadable, writes are not being persisted", "file", d.stateFile, "err", err, "pending_writes", writes)
+			}
+			continue
+		}
+		if info.Size() != lastSize || !info.ModTime().Equal(lastMod) {
+			// The backing store saved, remember how far it got.
+			lastSize, lastMod, saved, stalled = info.Size(), info.ModTime(), writes, 0
+			continue
+		}
+		if writes == saved {
+			// Nothing was written since the last save, so an unchanged state file
+			// is expected.
+			stalled = 0
+			continue
+		}
+		stalled++
+		if stalled%persistenceStallChecks != 0 {
+			continue
+		}
+		log.Error("PolarysDB is not persisting writes",
+			"file", d.stateFile, "size", info.Size(), "last_save", info.ModTime(),
+			"pending_writes", writes-saved, "hint", "check the free space and the permissions of the data directory")
+		// The backing store reports the reason its periodic dump stopped on its
+		// own console channel, which is easily lost in the service logs. Force a
+		// save through the public API so the failure makes it into the node log.
+		start := time.Now()
+		if err := d.db.Flush(); err != nil {
+			log.Error("PolarysDB flush failed", "file", d.stateFile, "err", err, "elapsed", time.Since(start))
+		} else {
+			log.Warn("PolarysDB flushed after a persistence stall", "file", d.stateFile, "elapsed", time.Since(start))
+		}
+	}
 }
 
 // Close closes the database.
 func (d *Database) Close() error {
-	return d.db.Close()
+	d.closeOnce.Do(func() { close(d.closeCh) })
+
+	err := d.db.Close()
+	if err != nil {
+		// The final dump of the state file failed, everything written since the
+		// last successful save is lost if the process exits now.
+		log.Error("Failed to persist PolarysDB on close", "file", d.stateFile, "err", err)
+	}
+	return err
 }
 
 // polarysRecord is used to store both key and value in PolarysDB,
@@ -100,54 +276,149 @@ func (d *Database) Close() error {
 type polarysRecord struct {
 	Key []byte `json:"k"`
 	Val []byte `json:"v"`
+
+	// Del marks a tombstone, a key that was deleted and must be reported as
+	// absent. Deleting for real is only possible one key at a time, so batched
+	// deletions are recorded as tombstones instead (see encodeTombstone).
+	Del bool `json:"d,omitempty"`
 }
 
-// Has retrieves if a key is present in the key-value store.
-func (d *Database) Has(key []byte) (bool, error) {
-	_, exists := d.db.Read(defaultTable, hex.EncodeToString(key))
-	return exists, nil
-}
+// Field names under which the key and the value are stored.
+const (
+	recordKeyField = "k"
+	recordValField = "v"
+	recordDelField = "d"
+)
 
-// Get retrieves the given key if it's present in the key-value store.
-func (d *Database) Get(key []byte) ([]byte, error) {
-	val, exists := d.db.Read(defaultTable, hex.EncodeToString(key))
-	if !exists {
-		return nil, errPolarysNotFound
+// encodeRecord wraps a key/value pair for storage.
+//
+// The pair is stored as a JSON friendly map instead of a struct because
+// PolarysDB only decodes JSON maps into Go values: a value written as a struct
+// is read back correctly while the process lives, but is handed out as a
+// map[string]any once it has been reloaded from disk, and the library's JSON
+// mapper copies the base64 text into []byte fields verbatim instead of decoding
+// it. Keeping both representations identical avoids that. Keys and values are
+// base64 encoded explicitly, which is also how encoding/json represents []byte
+// fields, so databases written by earlier versions remain readable.
+func encodeRecord(key, value []byte) map[string]any {
+	return map[string]any{
+		recordKeyField: base64.StdEncoding.EncodeToString(key),
+		recordValField: base64.StdEncoding.EncodeToString(value),
 	}
+}
 
-	record, err := d.toRecord(val)
+// encodeTombstone marks a key as deleted without removing it.
+//
+// PolarysDB deletes one key per call and every call waits for the next drain of
+// its write buffer, so deleting the keys of a batch one by one would turn a
+// block write into minutes of waiting. A tombstone travels in the same
+// WAL-backed batch as the writes and is filtered out on read.
+func encodeTombstone(key []byte) map[string]any {
+	return map[string]any{
+		recordKeyField: base64.StdEncoding.EncodeToString(key),
+		recordDelField: true,
+	}
+}
+
+// decodeRecord unpacks a stored value. Values written as structs by an earlier
+// version of this package are still accepted.
+func decodeRecord(raw any) (polarysRecord, error) {
+	if record, ok := raw.(polarysRecord); ok {
+		return record, nil
+	}
+	encoded, err := json.Marshal(raw)
 	if err != nil {
-		return nil, err
+		return polarysRecord{}, err
 	}
-	return record.Val, nil
-}
-
-// toRecord converts a value from PolarysDB (which might be a map if loaded from disk)
-// into a polarysRecord struct.
-func (d *Database) toRecord(val any) (polarysRecord, error) {
-	if r, ok := val.(polarysRecord); ok {
-		return r, nil
-	}
-	// When loaded from disk, PolarysDB returns map[string]any due to JSON unmarshaling
 	var record polarysRecord
-	data, err := json.Marshal(val)
-	if err != nil {
-		return record, err
-	}
-	if err := json.Unmarshal(data, &record); err != nil {
-		return record, err
+	if err := json.Unmarshal(encoded, &record); err != nil {
+		return polarysRecord{}, err
 	}
 	return record, nil
 }
 
+// Has retrieves if a key is present in the key-value store.
+func (d *Database) Has(key []byte) (bool, error) {
+	var raw map[string]any
+	if err := d.db.Read(defaultTable, hex.EncodeToString(key), &raw); err != nil {
+		return false, nil
+	}
+	record, err := decodeRecord(raw)
+	if err != nil {
+		return false, err
+	}
+	return !record.Del, nil
+}
+
+// Get retrieves the given key if it's present in the key-value store.
+func (d *Database) Get(key []byte) ([]byte, error) {
+	var raw map[string]any
+	if err := d.db.Read(defaultTable, hex.EncodeToString(key), &raw); err != nil {
+		return nil, errPolarysNotFound
+	}
+	record, err := decodeRecord(raw)
+	if err != nil {
+		return nil, err
+	}
+	if record.Del {
+		return nil, errPolarysNotFound
+	}
+	return record.Val, nil
+}
+
 // Put inserts the given value into the key-value store.
 func (d *Database) Put(key []byte, value []byte) error {
-	return d.db.Write(defaultTable, hex.EncodeToString(key), polarysRecord{Key: key, Val: value})
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+
+	err := d.db.Write(defaultTable, hex.EncodeToString(key), encodeRecord(key, value))
+	if err == nil {
+		d.pending.Add(1)
+	}
+	return err
 }
 
 // Delete removes the key from the key-value store.
 func (d *Database) Delete(key []byte) error {
-	return d.db.Delete(defaultTable, hex.EncodeToString(key))
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+
+	err := d.db.Delete(defaultTable, hex.EncodeToString(key))
+	if err == nil {
+		d.pending.Add(1)
+	}
+	return err
+}
+
+// writeRecords applies encoded records through the non-transactional write API,
+// which appends every record to the WAL before touching the in-memory tables.
+// The caller must hold wmu, the order of the records is the order of the WAL.
+func (d *Database) writeRecords(records map[string]any) error {
+	if len(records) == 0 {
+		return nil
+	}
+	capacity := len(records)
+	if capacity > maxWriteBatch {
+		capacity = maxWriteBatch
+	}
+	chunk := make(map[string]any, capacity)
+	for key, value := range records {
+		chunk[key] = value
+		if len(chunk) < maxWriteBatch {
+			continue
+		}
+		if err := d.db.WriteBatch(defaultTable, chunk); err != nil {
+			return err
+		}
+		chunk = make(map[string]any, maxWriteBatch)
+	}
+	if len(chunk) > 0 {
+		if err := d.db.WriteBatch(defaultTable, chunk); err != nil {
+			return err
+		}
+	}
+	d.pending.Add(1)
+	return nil
 }
 
 // DeleteRange deletes all of the keys (and values) in the range [start,end)
@@ -165,12 +436,16 @@ func (d *Database) DeleteRange(start, end []byte) error {
 }
 
 // NewBatch creates a write-only key-value store that buffers changes.
+//
+// The batch is committed through the non-transactional write API. Transactions
+// are avoided on purpose: PolarysDB never logs a commit of an explicit
+// transaction to its WAL, so such a write is only as durable as the next full
+// dump of the state file, and every commit also deep copies the whole database
+// as its snapshot. The plain write calls are appended to the WAL, which is
+// replayed on startup, and that is what keeps a block on disk even when the
+// dump never happens before the process dies.
 func (d *Database) NewBatch() ethdb.Batch {
-	txn, _ := d.db.BeginTransaction()
-	return &batch{
-		db:  d,
-		txn: txn,
-	}
+	return &batch{db: d}
 }
 
 // NewBatchWithSize creates a write-only database batch with pre-allocated buffer.
@@ -196,31 +471,32 @@ func (d *Database) Path() string {
 
 // SyncKeyValue flushes all pending writes to disk.
 func (d *Database) SyncKeyValue() error {
-	// PolarysDB handles periodic flushing based on SaveInterval.
-	// We can't force a manual snapshot flush easily via public API,
-	// but WAL is already synced periodically.
-	return nil
+	return d.db.Flush()
+}
+
+// batchOp is a single buffered mutation. The operations are retained so that a
+// rejected commit can be replayed onto a fresh transaction.
+type batchOp struct {
+	key   []byte
+	value []byte
+	del   bool
 }
 
 // batch is a write-only batch that commits changes to its host database.
 type batch struct {
 	db   *Database
-	txn  *tx.Transaction
+	ops  []batchOp
 	size int
 }
 
 func (b *batch) Put(key, value []byte) error {
-	if err := b.txn.Write(defaultTable, hex.EncodeToString(key), polarysRecord{Key: key, Val: value}); err != nil {
-		return err
-	}
+	b.ops = append(b.ops, batchOp{key: key, value: value})
 	b.size += len(key) + len(value)
 	return nil
 }
 
 func (b *batch) Delete(key []byte) error {
-	if err := b.txn.Delete(defaultTable, hex.EncodeToString(key)); err != nil {
-		return err
-	}
+	b.ops = append(b.ops, batchOp{key: key, del: true})
 	b.size += len(key)
 	return nil
 }
@@ -243,46 +519,48 @@ func (b *batch) ValueSize() int {
 	return b.size
 }
 
+// Write commits all buffered operations.
+//
+// Everything is handed to the WAL-backed write API, so the batch is durable as
+// soon as Write returns instead of waiting for the backing store to dump its
+// in-memory tables to the state file. Deletions have no batched counterpart in
+// the backing store and are recorded as tombstones within the same call.
 func (b *batch) Write() error {
-	return b.db.db.CommitTransaction(b.txn)
+	if len(b.ops) == 0 {
+		return nil
+	}
+	b.db.wmu.Lock()
+	defer b.db.wmu.Unlock()
+
+	records := make(map[string]any, len(b.ops))
+	for _, op := range b.ops {
+		key := hex.EncodeToString(op.key)
+		if op.del {
+			records[key] = encodeTombstone(op.key)
+			continue
+		}
+		records[key] = encodeRecord(op.key, op.value)
+	}
+	// A key put and deleted by the same batch collapses into a tombstone, which
+	// is the same result as applying the operations in order.
+	return b.db.writeRecords(records)
 }
 
 func (b *batch) Reset() {
-	b.txn, _ = b.db.db.BeginTransaction()
+	b.ops = nil
 	b.size = 0
 }
 
 func (b *batch) Replay(w ethdb.KeyValueWriter) error {
-	for table, tableData := range b.txn.Changes {
-		if table != defaultTable {
-			continue
-		}
-		for k, v := range tableData {
-			if v == nil {
-				decodedKey, _ := hex.DecodeString(k)
-				if err := w.Delete(decodedKey); err != nil {
-					return err
-				}
-				continue
-			}
-
-			// We use d.toRecord even if it's a batch because the transaction might have
-			// loaded existing data into Changes during Snapshot creation.
-			// Actually, Snapshot is a map[string]map[string]any from db.data.
-			// If db.data was loaded from disk, it contains maps.
-
-			// For simplicity, we'll use a temporary Database instance or just the helper logic
-			var record polarysRecord
-			if r, ok := v.(polarysRecord); ok {
-				record = r
-			} else {
-				data, _ := json.Marshal(v)
-				json.Unmarshal(data, &record)
-			}
-
-			if err := w.Put(record.Key, record.Val); err != nil {
+	for _, op := range b.ops {
+		if op.del {
+			if err := w.Delete(op.key); err != nil {
 				return err
 			}
+			continue
+		}
+		if err := w.Put(op.key, op.value); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -292,18 +570,35 @@ func (b *batch) Replay(w ethdb.KeyValueWriter) error {
 type polarysIterator struct {
 	records []polarysRecord
 	index   int
+	err     error
 }
 
 func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
-	all, _ := d.db.ReadBatch(defaultTable)
+	var stored []any
+	if err := d.db.ReadBatch(defaultTable, &stored); err != nil {
+		return &polarysIterator{index: -1, err: err}
+	}
+	// Seek to the first key matching prefix+start. The concatenation is copied
+	// because appending to the caller's prefix would overwrite its spare
+	// capacity in place.
+	seek := make([]byte, 0, len(prefix)+len(start))
+	seek = append(seek, prefix...)
+	seek = append(seek, start...)
+
+	// Collect the matching records into a separate slice, the source must not be
+	// appended to while it is being ranged over.
 	var records []polarysRecord
-	for _, a := range all {
-		record, err := d.toRecord(a)
+	for _, raw := range stored {
+		record, err := decodeRecord(raw)
 		if err != nil {
 			continue
 		}
+		// Deleted keys are kept as tombstones, iteration must not surface them.
+		if record.Del {
+			continue
+		}
 		// Filter by prefix and start
-		if bytes.HasPrefix(record.Key, prefix) && bytes.Compare(record.Key, append(prefix, start...)) >= 0 {
+		if bytes.HasPrefix(record.Key, prefix) && bytes.Compare(record.Key, seek) >= 0 {
 			records = append(records, record)
 		}
 	}
@@ -324,7 +619,7 @@ func (it *polarysIterator) Next() bool {
 }
 
 func (it *polarysIterator) Error() error {
-	return nil
+	return it.err
 }
 
 func (it *polarysIterator) Key() []byte {
